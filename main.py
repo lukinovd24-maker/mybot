@@ -15,9 +15,6 @@ PROJECT_NAME = "Вечернее сияние"
 dp = Dispatcher()
 bot = Bot(token=TOKEN)
 
-user_topics = {}
-topic_users = {}
-
 @dp.message(CommandStart(), F.chat.type == "private")
 async def start_cmd(message: Message):
     db.add_user(message.from_user.id)
@@ -70,19 +67,20 @@ async def user_message_handler(message: Message):
     user_id = message.from_user.id
     user_name = message.from_user.full_name
 
-    if user_id not in user_topics:
+    thread_id = db.get_thread_id(user_id)
+
+    # Если топик ещё не создан в БД, создаем его
+    if not thread_id:
         try:
             topic = await bot.create_forum_topic(
                 chat_id=GROUP_CHAT_ID,
                 name=f"{user_name} | ID: {user_id}"
             )
-            user_topics[user_id] = topic.message_thread_id
-            topic_users[topic.message_thread_id] = user_id
+            thread_id = topic.message_thread_id
+            db.save_topic(user_id, thread_id)
         except Exception as e:
-            logging.error(f"Ошибка при создании топика: {e}")
-            return await message.answer("Произошла ошибка при отправке сообщения. Убедитесь, что бот является админом группы.")
-
-    thread_id = user_topics[user_id]
+            logging.error(f"Ошибка создания топика: {e}")
+            return await message.answer("Не удалось связаться с администрацией. Попробуйте позже.")
 
     try:
         await bot.copy_message(
@@ -93,7 +91,24 @@ async def user_message_handler(message: Message):
         )
         await message.answer("Ваше сообщение отправлено администрации!")
     except Exception as e:
-        await message.answer("Не удалось доставить сообщение.")
+        # Если топик был удален вручную в Telegram, создаем новый
+        try:
+            topic = await bot.create_forum_topic(
+                chat_id=GROUP_CHAT_ID,
+                name=f"{user_name} | ID: {user_id}"
+            )
+            thread_id = topic.message_thread_id
+            db.save_topic(user_id, thread_id)
+            await bot.copy_message(
+                chat_id=GROUP_CHAT_ID,
+                from_chat_id=message.chat.id,
+                message_id=message.message_id,
+                message_thread_id=thread_id
+            )
+            await message.answer("Ваше сообщение отправлено администрации!")
+        except Exception as ex:
+            logging.error(f"Ошибка отправки: {ex}")
+            await message.answer("Не удалось доставить сообщение.")
 
 @dp.message(F.chat.id == GROUP_CHAT_ID)
 async def admin_reply_handler(message: Message):
@@ -101,7 +116,7 @@ async def admin_reply_handler(message: Message):
         return
 
     thread_id = message.message_thread_id
-    user_id = topic_users.get(thread_id)
+    user_id = db.get_user_by_thread(thread_id)
 
     if user_id:
         try:
@@ -111,7 +126,7 @@ async def admin_reply_handler(message: Message):
                 message_id=message.message_id
             )
         except Exception:
-            await message.answer("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.")
+            await message.answer("❌ Не удалось отправить ответ (возможно, пользователь заблокировал бота).")
 
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
@@ -125,18 +140,12 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Web server started on port {port}")
 
 async def main():
     db.init_db()
     logging.basicConfig(level=logging.INFO)
-    
-    # Запускаем веб-сервер фоновой задачей
     asyncio.create_task(start_web_server())
-    
     await asyncio.sleep(1)
-    
-    # Запускаем поллинг бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
