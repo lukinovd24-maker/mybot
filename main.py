@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
+from aiohttp import web
 import database as db
 
-TOKEN = "8641353697:AAH4Lm2D9v99e7-X0FT-poOa1OVm7oT9gvg"
+TOKEN = os.getenv("BOT_TOKEN", "8641353697:AAH4Lm2D9v99e7-X0FT-poOa1OVm7oT9gvg")
 GROUP_CHAT_ID = -1004404098187
 OWNER_ID = 8674242517
 PROJECT_NAME = "Вечернее сияние"
@@ -111,9 +113,22 @@ async def admin_reply_handler(message: Message):
         except Exception:
             await message.answer("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.")
 
+async def handle_ping(request):
+    return web.Response(text="Bot is alive!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
 async def main():
     db.init_db()
     logging.basicConfig(level=logging.INFO)
+    await start_web_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
