@@ -7,7 +7,7 @@ from aiogram.types import Message
 from aiohttp import web
 import database as db
 
-TOKEN = os.getenv("BOT_TOKEN", "8641353697:AAH4Lm2D9v99e7-X0FT-poOa1OVm7oT9gvg")
+TOKEN = os.getenv("BOT_TOKEN", "8641353697:AAGaWup_XK0YobyxpDTydxhEx5vsm_hBevc")
 GROUP_CHAT_ID = -1004404098187
 OWNER_ID = 8674242517
 PROJECT_NAME = "Вечернее сияние"
