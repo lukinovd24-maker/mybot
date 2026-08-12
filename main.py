@@ -131,10 +131,9 @@ async def main():
     db.init_db()
     logging.basicConfig(level=logging.INFO)
     
-    # Запускаем веб-сервер фоновой задачей сразу
+    # Запускаем веб-сервер фоновой задачей
     asyncio.create_task(start_web_server())
     
-    # Небольшая пауза, чтобы сервер поднялся
     await asyncio.sleep(1)
     
     # Запускаем поллинг бота
