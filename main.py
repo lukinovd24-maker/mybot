@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import os
@@ -7,7 +8,6 @@ from aiogram.types import Message
 from aiohttp import web
 import database as db
 
-# Новый токен установлен сюда
 TOKEN = os.getenv("BOT_TOKEN", "8641353697:AAGaWup_XK0YobyxpDTydxhEx5vsm_hBevc")
 GROUP_CHAT_ID = -1004404098187
 OWNER_ID = 8674242517
@@ -87,6 +87,7 @@ async def add_admin_cmd(message: Message):
     except ValueError:
         await message.answer("ID пользователя должен быть числом!")
 
+# Обработка сообщений от пользователей в ЛС
 @dp.message(F.chat.type == "private")
 async def user_message_handler(message: Message):
     db.add_user(message.from_user.id)
@@ -106,7 +107,7 @@ async def user_message_handler(message: Message):
             db.save_topic(user_id, thread_id)
         except Exception as e:
             logging.error(f"Ошибка создания топика: {e}")
-            return await message.answer("Не удалось связаться с администрацией. Попробуйте позже.")
+            return
 
     try:
         await bot.copy_message(
@@ -115,8 +116,7 @@ async def user_message_handler(message: Message):
             message_id=message.message_id,
             message_thread_id=thread_id
         )
-        await message.answer("Ваше сообщение отправлено администрации!")
-    except Exception as e:
+    except Exception:
         try:
             topic = await bot.create_forum_topic(
                 chat_id=GROUP_CHAT_ID,
@@ -130,18 +130,31 @@ async def user_message_handler(message: Message):
                 message_id=message.message_id,
                 message_thread_id=thread_id
             )
-            await message.answer("Ваше сообщение отправлено администрации!")
         except Exception as ex:
             logging.error(f"Ошибка отправки: {ex}")
-            await message.answer("Не удалось доставить сообщение.")
 
+# Обработка ответов админов из группы (ИГНОРИРУЕМ системные служебные сообщения)
 @dp.message(F.chat.id == GROUP_CHAT_ID)
 async def admin_reply_handler(message: Message):
+    # Если это системное сообщение о создании темы/закрепе — пропуск!
+    if message.forum_topic_created or message.forum_topic_edited or message.forum_topic_closed or message.is_automatic_forward:
+        return
+
     if not message.message_thread_id:
         return
 
     thread_id = message.message_thread_id
     user_id = db.get_user_by_thread(thread_id)
+
+    if not user_id:
+        try:
+            topic_info = message.reply_to_message.forum_topic_created if message.reply_to_message else None
+            if topic_info and "ID:" in topic_info.name:
+                extracted_id = int(topic_info.name.split("ID:")[1].strip())
+                db.save_topic(extracted_id, thread_id)
+                user_id = extracted_id
+        except Exception as e:
+            logging.error(f"Не удалось восстановить ID: {e}")
 
     if user_id:
         try:
@@ -174,7 +187,10 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     asyncio.create_task(start_web_server())
     await asyncio.sleep(1)
-    await dp.start_polling(bot)
+    
+    await bot.delete_webhook(drop_pending_updates=True)
+    # Слушаем ТОЛЬКО сообщения (игнорируем служебный спам от Telegram API)
+    await dp.start_polling(bot, allowed_updates=["message"])
 
 if __name__ == "__main__":
     asyncio.run(main())
