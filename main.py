@@ -114,21 +114,30 @@ async def admin_reply_handler(message: Message):
             await message.answer("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.")
 
 async def handle_ping(request):
-    return web.Response(text="Bot is alive!")
+    return web.Response(text="Bot is running!")
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_ping)
+    app.router.add_get("/health", handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    print(f"Web server started on port {port}")
 
 async def main():
     db.init_db()
     logging.basicConfig(level=logging.INFO)
-    await start_web_server()
+    
+    # Запускаем веб-сервер фоновой задачей сразу
+    asyncio.create_task(start_web_server())
+    
+    # Небольшая пауза, чтобы сервер поднялся
+    await asyncio.sleep(1)
+    
+    # Запускаем поллинг бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
