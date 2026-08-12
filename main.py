@@ -7,6 +7,7 @@ from aiogram.types import Message
 from aiohttp import web
 import database as db
 
+# Новый токен установлен сюда
 TOKEN = os.getenv("BOT_TOKEN", "8641353697:AAGaWup_XK0YobyxpDTydxhEx5vsm_hBevc")
 GROUP_CHAT_ID = -1004404098187
 OWNER_ID = 8674242517
@@ -23,6 +24,28 @@ async def start_cmd(message: Message):
         "Напишите сюда ваше сообщение, и администрация ответит вам в ближайшее время."
     )
 
+@dp.message(Command("stats"))
+async def stats_cmd(message: Message):
+    if not db.is_admin(message.from_user.id, OWNER_ID):
+        return
+    
+    total_users, blocked_users = db.get_user_counts()
+    stats_data = db.get_stats()
+    
+    user_msgs = stats_data.get("user_messages", 0)
+    admin_replies = stats_data.get("admin_replies", 0)
+    total_messages = user_msgs + admin_replies
+    
+    text = (
+        f"📊 **Статистика бота**\n"
+        f"👥 Общее кол-во пользователей: **{total_users}**\n"
+        f"🚫 Заблокированных: **{blocked_users}**\n\n"
+        f"💬 Общее количество сообщений (от админов + от пользователей): **{total_messages}**\n"
+        f"📥 Написано сообщений пользователями: **{user_msgs}**\n"
+        f"📤 Ответов от админов: **{admin_replies}**"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
 @dp.message(Command("broadcast"))
 async def broadcast_cmd(message: Message):
     if not db.is_admin(message.from_user.id, OWNER_ID):
@@ -34,15 +57,18 @@ async def broadcast_cmd(message: Message):
     
     users = db.get_all_users()
     count = 0
+    blocked_count = 0
+    
     for u_id in users:
         try:
             await bot.send_message(u_id, text_to_send)
             count += 1
             await asyncio.sleep(0.05)
         except Exception:
-            pass
+            db.set_user_blocked(u_id, True)
+            blocked_count += 1
             
-    await message.answer(f"📢 Рассылка завершена. Доставлено: {count}/{len(users)}")
+    await message.answer(f"📢 **Рассылка завершена!**\n\n✅ Доставлено: **{count}**\n🚫 Заблокировали бота: **{blocked_count}**", parse_mode="Markdown")
 
 @dp.message(Command("addadmin"))
 async def add_admin_cmd(message: Message):
@@ -64,12 +90,12 @@ async def add_admin_cmd(message: Message):
 @dp.message(F.chat.type == "private")
 async def user_message_handler(message: Message):
     db.add_user(message.from_user.id)
+    db.increment_stat("user_messages")
+    
     user_id = message.from_user.id
     user_name = message.from_user.full_name
-
     thread_id = db.get_thread_id(user_id)
 
-    # Если топик ещё не создан в БД, создаем его
     if not thread_id:
         try:
             topic = await bot.create_forum_topic(
@@ -91,7 +117,6 @@ async def user_message_handler(message: Message):
         )
         await message.answer("Ваше сообщение отправлено администрации!")
     except Exception as e:
-        # Если топик был удален вручную в Telegram, создаем новый
         try:
             topic = await bot.create_forum_topic(
                 chat_id=GROUP_CHAT_ID,
@@ -125,8 +150,11 @@ async def admin_reply_handler(message: Message):
                 from_chat_id=GROUP_CHAT_ID,
                 message_id=message.message_id
             )
+            db.increment_stat("admin_replies")
+            db.set_user_blocked(user_id, False)
         except Exception:
-            await message.answer("❌ Не удалось отправить ответ (возможно, пользователь заблокировал бота).")
+            db.set_user_blocked(user_id, True)
+            await message.answer("❌ Не удалось отправить ответ. Пользователь заблокировал бота.")
 
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
