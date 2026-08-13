@@ -72,15 +72,11 @@ async def get_user_role(user_id: int) -> str:
             if not row:
                 return "user"
             
-            # Проверяем, не на отдыхе ли пользователь
             rest_until = row["rest_until"]
             if rest_until:
-                # Сравниваем с текущим временем (UTC)
                 if rest_until > datetime.now(timezone.utc):
-                    # Если в отпуске, то для системы прав он временно обычный юзер
                     return "user"
                 else:
-                    # Отпуск закончился — очищаем поле в базе
                     await conn.execute("UPDATE users SET rest_until = NULL WHERE user_id = $1;", user_id)
 
             return row["role"] or "user"
@@ -512,7 +508,7 @@ async def stats_cmd(message: types.Message):
     )
     await message.reply(text, parse_mode=ParseMode.HTML)
 
-# --- ПЕРЕСЫЛКА СООБЩЕНИЙ С СОЗДАНИЕМ ТОПИКА И ЛОГАМИ ---
+# --- ПЕРЕСЫЛКА СООБЩЕНИЙ С СОЗДАНИЕМ ТОПИКА, КАРТОЧКОЙ ПЗ И ЗАКРЕПОМ ---
 @dp.message(F.chat.type == "private")
 async def forward_user_message(message: types.Message):
     if not ADMIN_CHAT_ID:
@@ -523,10 +519,11 @@ async def forward_user_message(message: types.Message):
         return
 
     user_id = message.from_user.id
-    username = message.from_user.username or "нет"
+    username = message.from_user.username or "отсутствует"
     full_name = message.from_user.full_name
 
     topic_id = None
+    is_new_topic = False
 
     if db_pool:
         async with db_pool.acquire() as conn:
@@ -535,9 +532,11 @@ async def forward_user_message(message: types.Message):
                 await message.reply("🚫 Вы заблокированы и не можете отправлять сообщения.")
                 return
 
-            topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
+            row = await conn.fetchrow("SELECT topic_id, is_banned FROM users WHERE user_id = $1;", user_id)
+            topic_id = row["topic_id"] if row else None
 
             if not topic_id:
+                is_new_topic = True
                 try:
                     topic_title = f"{full_name} (@{username})"[:128]
                     logging.info(f"🔄 Создаем новый топик для {user_id} в чате {ADMIN_CHAT_ID}...")
@@ -558,6 +557,35 @@ async def forward_user_message(message: types.Message):
             await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'user');", user_id)
 
     if topic_id:
+        if is_new_topic:
+            status_text = "🍏 Активен"
+            info_text = (
+                "👤 <b>Информация о пользователе (ПЗ):</b>\n\n"
+                f"📌 Имя: <b>{full_name}</b>\n"
+                f"🔗 Юзернейм: @{username}\n"
+                f"🆔 Telegram ID: <code>{user_id}</code>\n"
+                f"🔹 Статус: <b>{status_text}</b>\n"
+                f"❌ <b>Кто взял ПЗ:</b> Никто не взял"
+            )
+            
+            keyboard = types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [types.InlineKeyboardButton(text="🤝 Взять пользователя", callback_data=f"take_user_{user_id}")]
+                ]
+            )
+            
+            try:
+                sent_msg = await bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    message_thread_id=topic_id,
+                    text=info_text,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML
+                )
+                await bot.pin_chat_message(chat_id=ADMIN_CHAT_ID, message_id=sent_msg.message_id)
+            except Exception as e:
+                logging.error(f"❌ Ошибка отправки/закрепа инфо-сообщения: {e}")
+
         try:
             await bot.copy_message(
                 chat_id=ADMIN_CHAT_ID, 
@@ -569,7 +597,35 @@ async def forward_user_message(message: types.Message):
         except Exception as e:
             logging.error(f"❌ ОШИБКА ОТПРАВКИ СООБЩЕНИЯ В ТОПИК {topic_id}: {e}")
     else:
-        logging.error(f"⚠️ Сообщение не отправлено: topic_id равен None (проверьте права бота в чате).")
+        logging.error(f"⚠️ Сообщение не отправлено: topic_id равен None.")
+
+# --- ОБРАБОТКА КНОПКИ "ВЗЯТЬ ПОЛЬЗОВАТЕЛЯ" ---
+@dp.callback_query(F.data.startswith("take_user_"))
+async def take_user_callback(callback: types.CallbackQuery):
+    admin_user = callback.from_user
+    admin_name = f"@{admin_user.username}" if admin_user.username else admin_user.full_name
+    admin_info = f"{admin_name} (ID: <code>{admin_user.id}</code>)"
+
+    original_text = callback.message.html_text
+    
+    if "❌ <b>Кто взял ПЗ:</b>" in original_text:
+        updated_text = original_text.replace(
+            "❌ <b>Кто взял ПЗ:</b> Никто не взял",
+            f"✅ <b>Кто взял ПЗ:</b> {admin_info}"
+        )
+    else:
+        updated_text = original_text + f"\n\n✅ <b>Кто взял ПЗ:</b> {admin_info}"
+
+    try:
+        await callback.message.edit_text(
+            text=updated_text,
+            reply_markup=None,
+            parse_mode=ParseMode.HTML
+        )
+        await callback.answer("Вы успешно взяли пользователя!", show_alert=False)
+    except Exception as e:
+        logging.error(f"❌ Ошибка при обновлении сообщения о взятии ПЗ: {e}")
+        await callback.answer("Произошла ошибка при попытке взять пользователя.", show_alert=True)
 
 # --- ОТВЕТ АДМИНА ИЗ ТОПИКА ПОЛЬЗОВАТЕЛЮ ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
