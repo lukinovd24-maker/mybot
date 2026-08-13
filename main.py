@@ -74,6 +74,10 @@ async def is_admin(user_id: int) -> bool:
     role = await get_user_role(user_id)
     return role in ["owner", "director", "admin", "intern"]
 
+async def is_top_admin(user_id: int) -> bool:
+    role = await get_user_role(user_id)
+    return role in ["owner", "director"]
+
 # --- КОМАНДА /START ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -100,6 +104,7 @@ async def start_cmd(message: types.Message):
 async def help_cmd(message: types.Message):
     user_id = message.from_user.id
     user_is_admin = await is_admin(user_id)
+    user_is_top = await is_top_admin(user_id)
     
     text = "📌 <b>Список доступных команд:</b>\n\n"
     text += "👤 <b>Пользователям:</b>\n"
@@ -116,12 +121,78 @@ async def help_cmd(message: types.Message):
         text += "├ /setadmin [ID] — Назначить администратора\n"
         text += "├ /setintern [ID] — Назначить стажёра\n"
         text += "└ /demote [ID] — Снять роль до пользователя\n\n"
+
+    if user_is_top:
+        text += "🔑 <b>Владельцу и Директору:</b>\n"
+        text += "└ <code>.ид юз</code> или <code>.ид @username</code> — Узнать ID пользователя\n\n"
         
     if user_id == OWNER_ID:
         text += "👑 <b>Владельцу:</b>\n"
         text += "└ /setowner — Подтвердить права Владельца в БД\n"
 
     await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- КОМАНДА УЗНАТЬ ID (ДЛЯ ВЛАДЕЛЬЦА И ДИРЕКТОРОВ) ---
+@dp.message(F.text.lower().startswith(".ид") | Command("id"))
+async def get_user_id_cmd(message: types.Message):
+    if not await is_top_admin(message.from_user.id):
+        await message.reply("❌ Эта команда доступна только Владельцу и Директорам!")
+        return
+
+    target_user_id = None
+    target_username = None
+
+    # 1. Поиск по юзернейму из текста (.ид @username)
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("@"):
+        target_username = args[1].replace("@", "").strip()
+
+    # 2. Поиск по ответу на сообщение (Reply)
+    elif message.reply_to_message:
+        # Если ответили на пересланное сообщение от пользователя
+        if message.reply_to_message.forward_from:
+            target_user_id = message.reply_to_message.forward_from.id
+            target_username = message.reply_to_message.forward_from.username
+        # Если ответили в топике админ-чата
+        elif message.message_thread_id and db_pool:
+            async with db_pool.acquire() as conn:
+                target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
+
+    # 3. Если команда отправлена в топике без ответа
+    elif message.message_thread_id and db_pool:
+        async with db_pool.acquire() as conn:
+            target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
+
+    # Ищем в базе данных
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            if target_username and not target_user_id:
+                row = await conn.fetchrow("SELECT user_id, username, role, is_banned FROM users WHERE LOWER(username) = LOWER($1);", target_username)
+            elif target_user_id:
+                row = await conn.fetchrow("SELECT user_id, username, role, is_banned FROM users WHERE user_id = $1;", target_user_id)
+            else:
+                row = None
+
+            if row:
+                status = "🚫 Забанен" if row["is_banned"] else "🍏 Активен"
+                text = (
+                    "👤 <b>Информация о пользователе:</b>\n\n"
+                    f"🆔 Telegram ID: <code>{row['user_id']}</code>\n"
+                    f"👤 Юзернейм: @{row['username'] or 'отсутствует'}\n"
+                    f"🎭 Роль: <b>{row['role']}</b>\n"
+                    f"📌 Статус: <b>{status}</b>"
+                )
+                await message.reply(text, parse_mode=ParseMode.HTML)
+                return
+
+    if target_user_id:
+        await message.reply(f"🆔 Telegram ID пользователя: <code>{target_user_id}</code>", parse_mode=ParseMode.HTML)
+    else:
+        await message.reply(
+            "⚠️ <b>Не удалось найти ID.</b>\n"
+            "Используйте команду в нужным топике, либо ответьте на сообщение юзера, или напишите: <code>.ид @username</code>", 
+            parse_mode=ParseMode.HTML
+        )
 
 # --- УПРАВЛЕНИЕ РОЛЯМИ ---
 async def change_role(message: types.Message, command: CommandObject, new_role: str, role_name: str):
@@ -324,7 +395,7 @@ async def forward_user_message(message: types.Message):
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def reply_from_topic(message: types.Message):
     # Игнорируем служебные сообщения и команды
-    if not message.message_thread_id or message.text and message.text.startswith("/"):
+    if not message.message_thread_id or (message.text and (message.text.startswith("/") or message.text.startswith("."))):
         return
 
     if not db_pool:
