@@ -142,28 +142,20 @@ async def get_user_id_cmd(message: types.Message):
     target_user_id = None
     target_username = None
 
-    # 1. Поиск по юзернейму из текста (.ид @username)
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("@"):
         target_username = args[1].replace("@", "").strip()
-
-    # 2. Поиск по ответу на сообщение (Reply)
     elif message.reply_to_message:
-        # Если ответили на пересланное сообщение от пользователя
         if message.reply_to_message.forward_from:
             target_user_id = message.reply_to_message.forward_from.id
             target_username = message.reply_to_message.forward_from.username
-        # Если ответили в топике админ-чата
         elif message.message_thread_id and db_pool:
             async with db_pool.acquire() as conn:
                 target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
-
-    # 3. Если команда отправлена в топике без ответа
     elif message.message_thread_id and db_pool:
         async with db_pool.acquire() as conn:
             target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
 
-    # Ищем в базе данных
     if db_pool:
         async with db_pool.acquire() as conn:
             if target_username and not target_user_id:
@@ -190,7 +182,7 @@ async def get_user_id_cmd(message: types.Message):
     else:
         await message.reply(
             "⚠️ <b>Не удалось найти ID.</b>\n"
-            "Используйте команду в нужным топике, либо ответьте на сообщение юзера, или напишите: <code>.ид @username</code>", 
+            "Используйте команду в нужном топике, либо ответьте на сообщение юзера, или напишите: <code>.ид @username</code>", 
             parse_mode=ParseMode.HTML
         )
 
@@ -344,6 +336,10 @@ async def forward_user_message(message: types.Message):
     if not ADMIN_CHAT_ID:
         return
 
+    # Пропускаем стандартные команды
+    if message.text and message.text.startswith("/"):
+        return
+
     user_id = message.from_user.id
     username = message.from_user.username or "нет"
     full_name = message.from_user.full_name
@@ -352,49 +348,50 @@ async def forward_user_message(message: types.Message):
 
     if db_pool:
         async with db_pool.acquire() as conn:
-            # Проверка бана
             is_banned = await conn.fetchval("SELECT is_banned FROM users WHERE user_id = $1;", user_id)
             if is_banned:
                 await message.reply("🚫 Вы заблокированы и не можете отправлять сообщения.")
                 return
 
-            # Получаем id топика
             topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
 
-            # Если топика нет — создаем новый
             if not topic_id:
                 try:
                     topic_title = f"{full_name} (@{username})"[:128]
                     new_topic = await bot.create_forum_topic(chat_id=ADMIN_CHAT_ID, name=topic_title)
                     topic_id = new_topic.message_thread_id
 
-                    # Сохраняем topic_id в базу
                     await conn.execute("""
                         INSERT INTO users (user_id, username, topic_id) 
                         VALUES ($1, $2, $3)
                         ON CONFLICT (user_id) DO UPDATE SET topic_id = $3, username = $2;
                     """, user_id, username, topic_id)
                 except Exception as e:
-                    logging.error(f"Ошибка создания топика: {e}")
+                    logging.error(f" Ошибка при создании топика: {e}")
                     topic_id = None
 
-            # Фиксируем сообщение в базе
             await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'user');", user_id)
 
-    # Пересылаем сообщение в топик или в общий чат (если топик создать не удалось)
-    try:
-        if topic_id:
-            await bot.copy_message(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id, from_chat_id=message.chat.id, message_id=message.message_id)
-        else:
-            header = f"📩 <b>Новое сообщение</b>\nОт: {full_name} (@{username})\nID: <code>{user_id}</code>\n\n"
-            await bot.send_message(ADMIN_CHAT_ID, header + (message.text or "[Медиафайл]"), parse_mode=ParseMode.HTML)
-    except Exception as e:
-        logging.error(f"Ошибка пересылки сообщения: {e}")
+    # Пересылка исключительно в персональный топик
+    if topic_id:
+        try:
+            await bot.copy_message(
+                chat_id=ADMIN_CHAT_ID, 
+                message_thread_id=topic_id, 
+                from_chat_id=message.chat.id, 
+                message_id=message.message_id
+            )
+        except Exception as e:
+            logging.error(f"Не удалось переслать сообщение в топик {topic_id}: {e}")
 
 # --- ОТВЕТ АДМИНА ИЗ ТОПИКА ПОЛЬЗОВАТЕЛЮ ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def reply_from_topic(message: types.Message):
-    # Игнорируем служебные сообщения и команды
+    # Игнорируем служебные сообщения системы Telegram (создание топика и т.д.)
+    if message.forum_topic_created or message.forum_topic_edited:
+        return
+
+    # Игнорируем сообщения без топика, команды с / или точки
     if not message.message_thread_id or (message.text and (message.text.startswith("/") or message.text.startswith("."))):
         return
 
@@ -402,7 +399,6 @@ async def reply_from_topic(message: types.Message):
         return
 
     async with db_pool.acquire() as conn:
-        # Находим пользователя по ID его топика
         user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
 
         if user_id:
