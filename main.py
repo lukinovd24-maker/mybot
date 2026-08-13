@@ -38,8 +38,12 @@ async def init_db():
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
                     role TEXT DEFAULT 'user',
-                    is_banned BOOLEAN DEFAULT FALSE
+                    is_banned BOOLEAN DEFAULT FALSE,
+                    topic_id INT
                 );
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS topic_id INT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
+
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
@@ -263,45 +267,79 @@ async def stats_cmd(message: types.Message):
     )
     await message.reply(text, parse_mode=ParseMode.HTML)
 
-# --- ПЕРЕСЫЛКА СООБЩЕНИЙ (Пользователь -> Админ Чат) ---
+# --- ПЕРЕСЫЛКА СООБЩЕНИЙ С СОЗДАНИЕМ ТОПИКА ---
 @dp.message(F.chat.type == "private")
 async def forward_user_message(message: types.Message):
     if not ADMIN_CHAT_ID:
         return
 
+    user_id = message.from_user.id
+    username = message.from_user.username or "нет"
+    full_name = message.from_user.full_name
+
+    topic_id = None
+
     if db_pool:
         async with db_pool.acquire() as conn:
-            is_banned = await conn.fetchval("SELECT is_banned FROM users WHERE user_id = $1;", message.from_user.id)
+            # Проверка бана
+            is_banned = await conn.fetchval("SELECT is_banned FROM users WHERE user_id = $1;", user_id)
             if is_banned:
                 await message.reply("🚫 Вы заблокированы и не можете отправлять сообщения.")
                 return
-            await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'user');", message.from_user.id)
 
-    header = f"📩 <b>Новое сообщение</b>\nОт: {message.from_user.full_name} (@{message.from_user.username or 'нет'})\nID: <code>{message.from_user.id}</code>\n\n"
-    await bot.send_message(ADMIN_CHAT_ID, header + (message.text or "[Медиафайл]"), parse_mode=ParseMode.HTML)
+            # Получаем id топика
+            topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
 
-# --- ОТВЕТ АДМИНА ПОЛЬЗОВАТЕЛЮ ---
+            # Если топика нет — создаем новый
+            if not topic_id:
+                try:
+                    topic_title = f"{full_name} (@{username})"[:128]
+                    new_topic = await bot.create_forum_topic(chat_id=ADMIN_CHAT_ID, name=topic_title)
+                    topic_id = new_topic.message_thread_id
+
+                    # Сохраняем topic_id в базу
+                    await conn.execute("""
+                        INSERT INTO users (user_id, username, topic_id) 
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (user_id) DO UPDATE SET topic_id = $3, username = $2;
+                    """, user_id, username, topic_id)
+                except Exception as e:
+                    logging.error(f"Ошибка создания топика: {e}")
+                    topic_id = None
+
+            # Фиксируем сообщение в базе
+            await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'user');", user_id)
+
+    # Пересылаем сообщение в топик или в общий чат (если топик создать не удалось)
+    try:
+        if topic_id:
+            await bot.copy_message(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id, from_chat_id=message.chat.id, message_id=message.message_id)
+        else:
+            header = f"📩 <b>Новое сообщение</b>\nОт: {full_name} (@{username})\nID: <code>{user_id}</code>\n\n"
+            await bot.send_message(ADMIN_CHAT_ID, header + (message.text or "[Медиафайл]"), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logging.error(f"Ошибка пересылки сообщения: {e}")
+
+# --- ОТВЕТ АДМИНА ИЗ ТОПИКА ПОЛЬЗОВАТЕЛЮ ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
-async def reply_to_user(message: types.Message):
-    if not message.reply_to_message or not message.reply_to_message.text:
+async def reply_from_topic(message: types.Message):
+    # Игнорируем служебные сообщения и команды
+    if not message.message_thread_id or message.text and message.text.startswith("/"):
         return
 
-    lines = message.reply_to_message.text.split("\n")
-    user_id = None
-    for line in lines:
-        if line.startswith("ID:"):
-            user_id = int(line.replace("ID:", "").strip())
-            break
+    if not db_pool:
+        return
 
-    if user_id:
-        try:
-            await bot.send_message(user_id, f"💬 <b>Ответ поддержки:</b>\n\n{message.text}", parse_mode=ParseMode.HTML)
-            await message.reply("✅ Ответ отправлен пользователю!")
-            if db_pool:
-                async with db_pool.acquire() as conn:
-                    await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'admin');", user_id)
-        except Exception as e:
-            await message.reply(f"❌ Не удалось отправить сообщение: {e}")
+    async with db_pool.acquire() as conn:
+        # Находим пользователя по ID его топика
+        user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
+
+        if user_id:
+            try:
+                await bot.copy_message(chat_id=user_id, from_chat_id=ADMIN_CHAT_ID, message_id=message.message_id)
+                await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'admin');", user_id)
+            except Exception as e:
+                await message.reply(f"❌ Не удалось отправить сообщение пользователю: {e}")
 
 # --- ЗАПУСК ---
 async def main():
