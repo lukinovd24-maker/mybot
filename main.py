@@ -36,6 +36,9 @@ dp = Dispatcher()
 db_pool = None
 db_error_msg = ""
 
+# Кэш топиков в памяти (чтобы не спамить запросами к БД при каждом сообщении)
+user_topics_cache = {}
+
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
 async def init_db():
     global db_pool, db_error_msg
@@ -47,11 +50,13 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as conn:
+            # Создаем таблицу пользователей с полем topic_id
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
-                    role TEXT DEFAULT 'user'
+                    role TEXT DEFAULT 'user',
+                    topic_id INT
                 );
             """)
         logging.info("База данных PostgreSQL успешно инициализирована.")
@@ -84,6 +89,35 @@ async def get_user_role(user_id: int) -> str:
         except Exception as e:
             logging.error(f"Ошибка получения роли: {e}")
     return "user"
+
+# Сохранение и получение ID топика
+async def get_user_topic(user_id: int) -> int | None:
+    if user_id in user_topics_cache:
+        return user_topics_cache[user_id]
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
+                if topic_id:
+                    user_topics_cache[user_id] = topic_id
+                    return topic_id
+        except Exception as e:
+            logging.error(f"Ошибка получения topic_id: {e}")
+    return None
+
+async def save_user_topic(user_id: int, topic_id: int):
+    user_topics_cache[user_id] = topic_id
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO users (user_id, topic_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT (user_id) 
+                    DO UPDATE SET topic_id = EXCLUDED.topic_id;
+                """, user_id, topic_id)
+        except Exception as e:
+            logging.error(f"Ошибка сохранения topic_id: {e}")
 
 def extract_target_user_id(message: types.Message) -> int | None:
     if message.reply_to_message:
@@ -139,7 +173,7 @@ async def start_cmd(message: types.Message):
         logging.error(f"Ошибка при отправке фото: {e}")
         await message.answer(caption_text, parse_mode="HTML")
 
-# --- КОМАНДА /STATS (СТАТИСТИКА) ---
+# --- КОМАНДА /STATS ---
 @dp.message(Command("stats"))
 async def stats_cmd(message: types.Message):
     user_role = await get_user_role(message.from_user.id)
@@ -231,28 +265,60 @@ async def demote_cmd(message: types.Message):
     await message.reply(f"🗑 Роль с пользователя <code>{target_id}</code> снята.", parse_mode="HTML")
     await notify_user(target_id, "⚠️ <b>Уведомление:</b> Вы были сняты со своей должности в системе.")
 
-# --- ПЕРЕСЫЛКА СООБЩЕНИЙ ПОЛЬЗОВАТЕЛЕЙ В АДМИН-ЧАТ ---
+# --- ИНДИВИДУАЛЬНАЯ ПЕРЕСЫЛКА В ТОПИКИ ---
 @dp.message(F.chat.type == "private", ~F.text.startswith("/"))
 async def handle_user_messages(message: types.Message):
-    user_role = await get_user_role(message.from_user.id)
-    await set_user_role(message.from_user.id, message.from_user.username, user_role)
+    user_id = message.from_user.id
+    user_role = await get_user_role(user_id)
+    await set_user_role(user_id, message.from_user.username, user_role)
     
     try:
-        # 1. Шлем шапку с инфой о пользователе в админ-чат
-        header = (
-            f"📩 <b>Новое обращение в техподдержку!</b>\n"
-            f"👤 От: {message.from_user.full_name} (@{message.from_user.username or 'нет_юзернейма'})\n"
-            f"🆔 ID: <code>{message.from_user.id}</code>"
-        )
-        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=header, parse_mode="HTML")
-        
-        # 2. Дублируем само сообщение пользователя прямо в админ-чат
-        await message.copy_message(chat_id=ADMIN_CHAT_ID)
+        # Проверяем, есть ли уже созданный топик у этого пользователя
+        topic_id = await get_user_topic(user_id)
 
-        # 3. Отвечаем пользователю
+        # Если топика еще нет — создаем новый персональный топик
+        if not topic_id:
+            username_str = f"@{message.from_user.username}" if message.from_user.username else f"ID: {user_id}"
+            topic_name = f"{message.from_user.full_name} | {username_str}"
+            
+            # Обрезаем имя топика до 128 символов (ограничение Telegram)
+            if len(topic_name) > 128:
+                topic_name = topic_name[:125] + "..."
+
+            created_topic = await bot.create_forum_topic(
+                chat_id=ADMIN_CHAT_ID,
+                name=topic_name
+            )
+            topic_id = created_topic.message_thread_id
+            await save_user_topic(user_id, topic_id)
+
+            # Карточка пользователя при первом обращении в его топике
+            header = (
+                f"👤 <b>Новая карточка диалога!</b>\n"
+                f"├ Имя: <b>{message.from_user.full_name}</b>\n"
+                f"├ Юзернейм: @{message.from_user.username or 'нет'}\n"
+                f"└ ID: <code>{user_id}</code>"
+            )
+            await bot.send_message(
+                chat_id=ADMIN_CHAT_ID, 
+                text=header, 
+                parse_mode="HTML", 
+                message_thread_id=topic_id
+            )
+
+        # Пересылаем сообщение именно в личный топик пользователя
+        await bot.copy_message(
+            chat_id=ADMIN_CHAT_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+            message_thread_id=topic_id
+        )
+
+        # Подтверждение пользователю
         await message.reply("✅ Ваше сообщение отправлено администрации! Вам ответят в ближайшее время.")
+        
     except Exception as e:
-        logging.error(f"Ошибка при пересылке сообщения: {e}")
+        logging.error(f"Ошибка при пересылке в топик: {e}")
         await message.reply(f"⚠️ Не удалось переслать сообщение администрации: {e}")
 
 # --- ЗАПУСК БОТА ---
