@@ -53,6 +53,14 @@ async def init_db():
                     sender_type TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+
+                CREATE TABLE IF NOT EXISTS admin_actions (
+                    id SERIAL PRIMARY KEY,
+                    admin_id BIGINT,
+                    admin_username TEXT,
+                    target_user_id BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
             """)
         logging.info("База данных PostgreSQL успешно инициализирована.")
         db_error_msg = ""
@@ -140,6 +148,7 @@ async def help_cmd(message: types.Message):
     elif role in ["admin", "intern"]:
         text += "🛡 <b>Администрации:</b>\n"
         text += "├ /stats — Статистика бота\n"
+        text += "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
         text += "├ /check или .чек — Проверить пользователя\n"
         text += "├ /ban [ID] — Заблокировать пользователя\n"
         text += "└ /unban [ID] — Разблокировать пользователя\n"
@@ -147,6 +156,7 @@ async def help_cmd(message: types.Message):
     elif role == "director":
         text += "💼 <b>Директорат:</b>\n"
         text += "├ /stats — Статистика бота\n"
+        text += "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
         text += "├ /check или .чек — Проверить пользователя\n"
         text += "├ /ban /unban [ID] — Управление банами\n"
         text += "├ /broadcast [текст] — Рассылка пользователям\n"
@@ -156,6 +166,7 @@ async def help_cmd(message: types.Message):
     elif role == "owner":
         text += "👑 <b>Владелец:</b>\n"
         text += "├ /stats — Статистика бота\n"
+        text += "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
         text += "├ /check или .чек — Проверить пользователя\n"
         text += "├ /ban /unban [ID] — Управление банами\n"
         text += "├ /broadcast [текст] — Рассылка\n"
@@ -168,6 +179,73 @@ async def help_cmd(message: types.Message):
         text += "└ /setowner — Подтвердить права Владельца\n"
 
     await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- СТАТИСТИКА АДМИНОВ ПО ВЗЯТЫМ ПЗ (/adminstats) ---
+async def process_admin_stats(message: types.Message):
+    if not await is_admin(message.from_user.id):
+        await message.reply("❌ Эта команда доступна только администрации!")
+        return
+
+    if not db_pool:
+        await message.reply("⚠️ База данных недоступна!")
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now_utc - timedelta(days=7)
+    month_start = now_utc - timedelta(days=30)
+
+    async with db_pool.acquire() as conn:
+        # Получаем данные за день, неделю, месяц и всё время
+        day_rows = await conn.fetch("""
+            SELECT admin_id, admin_username, COUNT(*) as count 
+            FROM admin_actions WHERE created_at >= $1 
+            GROUP BY admin_id, admin_username ORDER BY count DESC;
+        """, today_start)
+
+        week_rows = await conn.fetch("""
+            SELECT admin_id, admin_username, COUNT(*) as count 
+            FROM admin_actions WHERE created_at >= $1 
+            GROUP BY admin_id, admin_username ORDER BY count DESC;
+        """, week_start)
+
+        month_rows = await conn.fetch("""
+            SELECT admin_id, admin_username, COUNT(*) as count 
+            FROM admin_actions WHERE created_at >= $1 
+            GROUP BY admin_id, admin_username ORDER BY count DESC;
+        """, month_start)
+
+        total_rows = await conn.fetch("""
+            SELECT admin_id, admin_username, COUNT(*) as count 
+            FROM admin_actions 
+            GROUP BY admin_id, admin_username ORDER BY count DESC;
+        """)
+
+    def format_rows(rows):
+        if not rows:
+            return "<i>Пока нет данных</i>\n"
+        res = ""
+        for idx, r in enumerate(rows, 1):
+            name = f"@{r['admin_username']}" if r['admin_username'] and r['admin_username'] != 'отсутствует' else f"ID: {r['admin_id']}"
+            res += f"{idx}. {name} — <b>{r['count']}</b>\n"
+        return res
+
+    text = (
+        "📊 <b>Статистика работы администрации (взятые ПЗ):</b>\n\n"
+        f"📅 <b>За сегодня:</b>\n{format_rows(day_rows)}\n"
+        f"week <b>За неделю (7 дней):</b>\n{format_rows(week_rows)}\n".replace("week ", "📈 ") +
+        f"🗓 <b>За месяц (30 дней):</b>\n{format_rows(month_rows)}\n"
+        f"🏆 <b>За всё время:</b>\n{format_rows(total_rows)}"
+    )
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("adminstats"))
+async def admin_stats_cmd(message: types.Message):
+    await process_admin_stats(message)
+
+@dp.message(F.text.lower().startswith(".астат"))
+async def admin_stats_dot(message: types.Message):
+    await process_admin_stats(message)
 
 # --- СИСТЕМА ОТПУСКОВ (/rest) ---
 @dp.message(Command("rest"))
@@ -602,9 +680,19 @@ async def forward_user_message(message: types.Message):
 # --- ОБРАБОТКА КНОПКИ "ВЗЯТЬ ПОЛЬЗОВАТЕЛЯ" ---
 @dp.callback_query(F.data.startswith("take_user_"))
 async def take_user_callback(callback: types.CallbackQuery):
+    target_user_id = int(callback.data.split("_")[2])
     admin_user = callback.from_user
-    admin_name = f"@{admin_user.username}" if admin_user.username else admin_user.full_name
+    admin_username = admin_user.username or "отсутствует"
+    admin_name = f"@{admin_username}" if admin_username != "отсутствует" else admin_user.full_name
     admin_info = f"{admin_name} (ID: <code>{admin_user.id}</code>)"
+
+    # Сохраняем действие в базу для статистики админов
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO admin_actions (admin_id, admin_username, target_user_id) VALUES ($1, $2, $3);",
+                admin_user.id, admin_username, target_user_id
+            )
 
     original_text = callback.message.html_text
     
