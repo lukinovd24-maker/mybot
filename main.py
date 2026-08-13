@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", 0)) if os.getenv("ADMIN_CHAT_ID") else None
 OWNER_ID = 8674242517
 
 bot = Bot(token=BOT_TOKEN)
@@ -30,61 +29,65 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS admin_actions (id SERIAL PRIMARY KEY, admin_id BIGINT, admin_username TEXT, target_user_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         """)
 
-# --- ПРОВЕРКИ ---
-async def get_user_role(user_id: int) -> str:
-    if user_id == OWNER_ID: return "owner"
-    if not db_pool: return "user"
+async def is_admin(user_id: int) -> bool:
+    if user_id == OWNER_ID: return True
+    if not db_pool: return False
     try:
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT role, rest_until FROM users WHERE user_id = $1;", user_id)
-            if not row: return "user"
-            if row["rest_until"] and row["rest_until"] > datetime.now(): return "user"
-            return row["role"] or "user"
-    except: return "user"
-
-async def is_admin(user_id: int) -> bool:
-    return str(await get_user_role(user_id)).lower() in ["owner", "director", "admin", "intern"]
+            role = await conn.fetchval("SELECT role FROM users WHERE user_id = $1;", user_id)
+            return str(role).lower() in ["director", "admin", "intern"]
+    except: return False
 
 # --- СТАТИСТИКА БОТА (/stats) ---
 @dp.message(Command("stats"))
 async def stats_cmd(message: types.Message):
-    if not db_pool:
-        await message.reply("⚠️ База данных недоступна.")
-        return
-
+    if not db_pool: return
     async with db_pool.acquire() as conn:
         total_users = await conn.fetchval("SELECT COUNT(*) FROM users;") or 0
-        total_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages;") or 0
+        banned = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE;") or 0
+        owners = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'owner';") or 0
+        dirs = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'director';") or 0
+        admins = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';") or 0
+        interns = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';") or 0
+        users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'user';") or 0
+        
+        u_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'user';") or 0
+        a_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'admin';") or 0
         
     text = (
-        "📊 <b>Статистика бота:</b>\n\n"
-        f"👥 Всего пользователей: <b>{total_users}</b>\n"
-        f"💬 Всего сообщений: <b>{total_msgs}</b>"
+        "📊 <b>Полная статистика бота:</b>\n\n"
+        "👥 <b>Пользователи:</b>\n"
+        f"├ Всего пользователей: <b>{total_users}</b>\n"
+        f"├ 🍏 Активных (чистых): <b>{total_users - banned}</b>\n"
+        f"└ 🚫 Забаненных: <b>{banned}</b>\n\n"
+        "🎭 <b>Разделение по ролям:</b>\n"
+        f"├ 👑 Владелец: <b>{owners}</b>\n"
+        f"├ 💼 Директоров: <b>{dirs}</b>\n"
+        f"├ 🛡 Администраторов: <b>{admins}</b>\n"
+        f"├ 🔰 Стажёров: <b>{interns}</b>\n"
+        f"└ 👤 Пользователей: <b>{users}</b>\n\n"
+        "✉️ <b>Сообщения и активность:</b>\n"
+        f"├ 📩 От пользователей: <b>{u_msgs}</b>\n"
+        f"├ 📤 От администраторов: <b>{a_msgs}</b>\n"
+        f"└ 💬 Всего сообщений: <b>{u_msgs + a_msgs}</b>"
     )
     await message.reply(text, parse_mode=ParseMode.HTML)
 
 # --- АДМИН СТАТИСТИКА ---
 async def process_admin_stats(message: types.Message):
-    if not await is_admin(message.from_user.id):
-        await message.reply("❌ Доступ только для администрации.")
-        return
-        
+    if not await is_admin(message.from_user.id): return
     try:
         now = datetime.now()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
         async with db_pool.acquire() as conn:
-            day_rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions WHERE created_at >= $1 GROUP BY admin_id, admin_username ORDER BY count DESC;", today_start)
-        
-        res = "<b>Статистика админов за сегодня:</b>\n"
-        for idx, r in enumerate(day_rows, 1):
+            rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions WHERE created_at >= $1 GROUP BY admin_id, admin_username ORDER BY count DESC;", today)
+        res = "📊 <b>Статистика админов (ПЗ) за сегодня:</b>\n"
+        for idx, r in enumerate(rows, 1):
             d = dict(r)
-            name = f"@{d.get('admin_username')}" if d.get('admin_username') else f"ID: {d.get('admin_id')}"
-            res += f"{idx}. {name} — <b>{d.get('count')}</b>\n"
-        
-        await message.reply(res or "<i>Данных пока нет</i>", parse_mode=ParseMode.HTML)
+            res += f"{idx}. @{d['admin_username'] or 'ID:'+str(d['admin_id'])} — <b>{d['count']}</b>\n"
+        await message.reply(res or "Данных нет", parse_mode=ParseMode.HTML)
     except Exception as e:
-        await message.reply(f"❌ Ошибка: {str(e)}")
+        await message.reply(f"Ошибка: {e}")
 
 @dp.message(Command("adminstats"))
 async def admin_stats_cmd(message: types.Message): await process_admin_stats(message)
