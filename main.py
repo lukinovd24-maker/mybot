@@ -109,9 +109,6 @@ async def start_cmd(message: types.Message):
 # --- КОМАНДА /HELP ---
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
-    user_id = message.from_user.id
-    role = await get_user_role(user_id)
-
     text = (
         "📌 <b>Список доступных команд:</b>\n\n"
         "👑 <b>Владелец:</b>\n"
@@ -128,7 +125,6 @@ async def help_cmd(message: types.Message):
         "├ /demote [ID] — Понизить до пользователя\n"
         "└ /setowner — Подтвердить права Владельца"
     )
-
     await message.reply(text, parse_mode=ParseMode.HTML)
 
 # --- ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ ДЛЯ АДМИНИСТРАЦИИ И ВЛАДЕЛЬЦА ---
@@ -140,16 +136,38 @@ async def stats_cmd(message: types.Message):
     if not db_pool:
         await message.reply("База данных недоступна.")
         return
+    
     async with db_pool.acquire() as conn:
         users_count = await conn.fetchval("SELECT COUNT(*) FROM users;")
         banned_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE;")
-        msgs_count = await conn.fetchval("SELECT COUNT(*) FROM messages;")
-    
+        active_count = users_count - banned_count
+        
+        owner_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'owner' OR user_id = $1;", OWNER_ID)
+        director_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'director';")
+        admin_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';")
+        intern_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';")
+        user_role_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'user' OR role IS NULL;")
+        
+        user_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'user';")
+        admin_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'admin';")
+        total_msgs = user_msgs + admin_msgs
+
     text = (
-        "📊 <b>Статистика бота:</b>\n\n"
-        f"👥 Всего пользователей: <b>{users_count}</b>\n"
-        f"🚫 Заблокировано: <b>{banned_count}</b>\n"
-        f"💬 Всего сообщений: <b>{msgs_count}</b>"
+        "📊 <b>Полная статистика бота:</b>\n\n"
+        "👥 <b>Пользователи:</b>\n"
+        f"├ Всего пользователей: {users_count}\n"
+        f"├ 🍏 Активных (чистых): {active_count}\n"
+        f"└ 🚫 Забаненных: {banned_count}\n\n"
+        "🎭 <b>Разделение по ролям:</b>\n"
+        f"├ 👑 Владелец: {owner_count}\n"
+        f"├ 💼 Директоров: {director_count}\n"
+        f"├ 🛡 Администраторов: {admin_count}\n"
+        f"├ 🔰 Стажёров: {intern_count}\n"
+        f"└ 👤 Пользователей: {user_role_count}\n\n"
+        "✉️ <b>Сообщения и активность:</b>\n"
+        f"├ 📩 От пользователей: {user_msgs}\n"
+        f"├ 📤 От администраторов: {admin_msgs}\n"
+        f"└ 💬 Всего сообщений: {total_msgs}"
     )
     await message.reply(text, parse_mode=ParseMode.HTML)
 
@@ -159,20 +177,74 @@ async def adminstats_cmd(message: types.Message):
         return
     if not db_pool:
         return
+    
+    now = datetime.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    month_start = now - timedelta(days=30)
+
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
+        today_rows = await conn.fetch("""
+            SELECT admin_username, COUNT(*) as cnt 
+            FROM admin_actions 
+            WHERE created_at >= $1 
+            GROUP BY admin_username 
+            ORDER BY cnt DESC LIMIT 10;
+        """, today_start)
+
+        week_rows = await conn.fetch("""
+            SELECT admin_username, COUNT(*) as cnt 
+            FROM admin_actions 
+            WHERE created_at >= $1 
+            GROUP BY admin_username 
+            ORDER BY cnt DESC LIMIT 10;
+        """, week_start)
+
+        month_rows = await conn.fetch("""
+            SELECT admin_username, COUNT(*) as cnt 
+            FROM admin_actions 
+            WHERE created_at >= $1 
+            GROUP BY admin_username 
+            ORDER BY cnt DESC LIMIT 10;
+        """, month_start)
+
+        all_rows = await conn.fetch("""
             SELECT admin_username, COUNT(*) as cnt 
             FROM admin_actions 
             GROUP BY admin_username 
             ORDER BY cnt DESC LIMIT 10;
         """)
-    if not rows:
-        await message.reply("📈 Статистика взятых ПЗ пока пуста.")
-        return
+
+    text = "📊 <b>Статистика работы администрации (взятые ПЗ):</b>\n\n"
     
-    text = "📈 <b>Топ администраторов по взятым ПЗ:</b>\n\n"
-    for idx, r in enumerate(rows, 1):
-        text += f"{idx}. @{r['admin_username']} — <b>{r['cnt']}</b>\n"
+    text += "📅 <b>За сегодня:</b>\n"
+    if today_rows:
+        for idx, r in enumerate(today_rows, 1):
+            text += f"{idx}. @{r['admin_username']} — {r['cnt']}\n"
+    else:
+        text += "Пока нет данных.\n"
+    
+    text += "\n📈 <b>За неделю (7 дней):</b>\n"
+    if week_rows:
+        for idx, r in enumerate(week_rows, 1):
+            text += f"{idx}. @{r['admin_username']} — {r['cnt']}\n"
+    else:
+        text += "Пока нет данных.\n"
+
+    text += "\n🗓 <b>За месяц (30 дней):</b>\n"
+    if month_rows:
+        for idx, r in enumerate(month_rows, 1):
+            text += f"{idx}. @{r['admin_username']} — {r['cnt']}\n"
+    else:
+        text += "Пока нет данных.\n"
+
+    text += "\n🏆 <b>За всё время:</b>\n"
+    if all_rows:
+        for idx, r in enumerate(all_rows, 1):
+            text += f"{idx}. @{r['admin_username']} — {r['cnt']}\n"
+    else:
+        text += "Пока нет данных."
+
     await message.reply(text, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text.startswith(".астат"), F.chat.id == ADMIN_CHAT_ID)
