@@ -63,8 +63,8 @@ async def is_director_or_owner(user_id: int) -> bool:
     role = await get_user_role(user_id)
     return str(role).lower() in ["owner", "director"]
 
-async def is_top_admin(user_id: int) -> bool:
-    return await is_director_or_owner(user_id)
+async def is_owner(user_id: int) -> bool:
+    return user_id == OWNER_ID or (await get_user_role(user_id)) == "owner"
 
 # --- КОМАНДА /START ---
 @dp.message(Command("start"))
@@ -134,6 +134,101 @@ async def help_cmd(message: types.Message):
         text += "└ /setowner — Подтвердить права Владельца\n"
 
     await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- УПРАВЛЕНИЕ РОЛЯМИ (ТОЛЬКО OWNER) ---
+async def change_user_role(message: types.Message, command: CommandObject, new_role: str, role_name_ru: str):
+    if not await is_owner(message.from_user.id):
+        await message.reply("❌ Эта команда доступна только Владельцу!")
+        return
+
+    target_id = None
+    if command.args and command.args.isdigit():
+        target_id = int(command.args)
+    elif message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+
+    if not target_id:
+        await message.reply(f"⚠️ Укажите ID или ответьте на сообщение пользователя:\n<code>/set{new_role} 12345678</code>", parse_mode=ParseMode.HTML)
+        return
+
+    if not db_pool:
+        await message.reply("⚠️ База данных недоступна!")
+        return
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET role = $1 WHERE user_id = $2;", new_role, target_id)
+    await message.reply(f"✅ Пользователь <code>{target_id}</code> назначен на роль: <b>{role_name_ru}</b>", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("setdirector"))
+async def set_director_cmd(message: types.Message, command: CommandObject):
+    await change_user_role(message, command, "director", "Директор")
+
+@dp.message(Command("setadmin"))
+async def set_admin_cmd(message: types.Message, command: CommandObject):
+    await change_user_role(message, command, "admin", "Администратор")
+
+@dp.message(Command("setintern"))
+async def set_intern_cmd(message: types.Message, command: CommandObject):
+    await change_user_role(message, command, "intern", "Стажёр")
+
+@dp.message(Command("demote"))
+async def demote_cmd(message: types.Message, command: CommandObject):
+    await change_user_role(message, command, "user", "Пользователь")
+
+@dp.message(Command("setowner"))
+async def set_owner_cmd(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply("❌ Недостаточно прав!")
+        return
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET role = 'owner' WHERE user_id = $1;", OWNER_ID)
+    await message.reply("👑 Права владельца подтверждены!", parse_mode=ParseMode.HTML)
+
+# --- ОТПУСК И ПОИСК ID ---
+@dp.message(Command("rest"))
+async def rest_cmd(message: types.Message, command: CommandObject):
+    if not await is_director_or_owner(message.from_user.id):
+        await message.reply("❌ Недостаточно прав!")
+        return
+    if not command.args:
+        await message.reply("⚠️ Пример: <code>/rest @username 3</code> или <code>/rest ID 5</code>", parse_mode=ParseMode.HTML)
+        return
+
+    parts = command.args.split()
+    target_arg = parts[0]
+    days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+
+    rest_until = datetime.now() + timedelta(days=days)
+    if not db_pool:
+        return
+
+    async with db_pool.acquire() as conn:
+        if target_arg.startswith("@"):
+            uname = target_arg.replace("@", "")
+            await conn.execute("UPDATE users SET rest_until = $1 WHERE LOWER(username) = LOWER($2);", rest_until, uname)
+        elif target_arg.isdigit():
+            await conn.execute("UPDATE users SET rest_until = $1 WHERE user_id = $2;", rest_until, int(target_arg))
+
+    await message.reply(f"🏖 Администратор отправлен в отпуск на {days} дн. до {rest_until.strftime('%Y-%m-%d %H:%M')}", parse_mode=ParseMode.HTML)
+
+@dp.message(F.text.lower().startswith(".ид"))
+async def get_id_dot(message: types.Message):
+    if not await is_director_or_owner(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) < 2 or not args[1].startswith("@"):
+        await message.reply("⚠️ Укажите юзернейм: <code>.ид @username</code>", parse_mode=ParseMode.HTML)
+        return
+    uname = args[1].replace("@", "").strip()
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        uid = await conn.fetchval("SELECT user_id FROM users WHERE LOWER(username) = LOWER($1);", uname)
+    if uid:
+        await message.reply(f"🆔 ID пользователя @{uname}: <code>{uid}</code>", parse_mode=ParseMode.HTML)
+    else:
+        await message.reply("⚠️ Пользователь не найден в базе.", parse_mode=ParseMode.HTML)
 
 # --- ПРОВЕРКА ПОЛЬЗОВАТЕЛЯ (/check и .чек) ---
 async def process_check_user(message: types.Message):
