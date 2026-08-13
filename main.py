@@ -36,7 +36,7 @@ dp = Dispatcher()
 db_pool = None
 db_error_msg = ""
 
-# Кэш топиков в памяти (чтобы не спамить запросами к БД при каждом сообщении)
+# Кэш топиков в памяти
 user_topics_cache = {}
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
@@ -50,7 +50,6 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as conn:
-            # Создаем таблицу пользователей с полем topic_id
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -119,6 +118,22 @@ async def save_user_topic(user_id: int, topic_id: int):
         except Exception as e:
             logging.error(f"Ошибка сохранения topic_id: {e}")
 
+# Поиск пользователя по topic_id
+async def get_user_by_topic(topic_id: int) -> int | None:
+    for uid, tid in user_topics_cache.items():
+        if tid == topic_id:
+            return uid
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", topic_id)
+                if user_id:
+                    user_topics_cache[user_id] = topic_id
+                    return user_id
+        except Exception as e:
+            logging.error(f"Ошибка поиска пользователя по топику: {e}")
+    return None
+
 def extract_target_user_id(message: types.Message) -> int | None:
     if message.reply_to_message:
         return message.reply_to_message.from_user.id
@@ -134,7 +149,7 @@ async def notify_user(user_id: int, text: str):
         logging.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
 
 # --- ПОЛУЧЕНИЕ FILE_ID КАРТИНОК (Только для Владельца) ---
-@dp.message(F.photo, F.from_user.id == OWNER_ID)
+@dp.message(F.photo, F.from_user.id == OWNER_ID, F.chat.type == "private")
 async def get_photo_file_id(message: types.Message):
     photo_id = message.photo[-1].file_id
     await message.reply(
@@ -145,7 +160,7 @@ async def get_photo_file_id(message: types.Message):
     )
 
 # --- КОМАНДА /START ---
-@dp.message(CommandStart())
+@dp.message(CommandStart(), F.chat.type == "private")
 async def start_cmd(message: types.Message):
     role = await get_user_role(message.from_user.id)
     await set_user_role(message.from_user.id, message.from_user.username, role)
@@ -265,7 +280,7 @@ async def demote_cmd(message: types.Message):
     await message.reply(f"🗑 Роль с пользователя <code>{target_id}</code> снята.", parse_mode="HTML")
     await notify_user(target_id, "⚠️ <b>Уведомление:</b> Вы были сняты со своей должности в системе.")
 
-# --- ИНДИВИДУАЛЬНАЯ ПЕРЕСЫЛКА В ТОПИКИ ---
+# --- 1. ПЕРЕСЫЛКА ОТ ПОЛЬЗОВАТЕЛЯ В ТОПИК ---
 @dp.message(F.chat.type == "private", ~F.text.startswith("/"))
 async def handle_user_messages(message: types.Message):
     user_id = message.from_user.id
@@ -273,15 +288,11 @@ async def handle_user_messages(message: types.Message):
     await set_user_role(user_id, message.from_user.username, user_role)
     
     try:
-        # Проверяем, есть ли уже созданный топик у этого пользователя
         topic_id = await get_user_topic(user_id)
 
-        # Если топика еще нет — создаем новый персональный топик
         if not topic_id:
             username_str = f"@{message.from_user.username}" if message.from_user.username else f"ID: {user_id}"
             topic_name = f"{message.from_user.full_name} | {username_str}"
-            
-            # Обрезаем имя топика до 128 символов (ограничение Telegram)
             if len(topic_name) > 128:
                 topic_name = topic_name[:125] + "..."
 
@@ -292,7 +303,6 @@ async def handle_user_messages(message: types.Message):
             topic_id = created_topic.message_thread_id
             await save_user_topic(user_id, topic_id)
 
-            # Карточка пользователя при первом обращении в его топике
             header = (
                 f"👤 <b>Новая карточка диалога!</b>\n"
                 f"├ Имя: <b>{message.from_user.full_name}</b>\n"
@@ -306,7 +316,6 @@ async def handle_user_messages(message: types.Message):
                 message_thread_id=topic_id
             )
 
-        # Пересылаем сообщение именно в личный топик пользователя
         await bot.copy_message(
             chat_id=ADMIN_CHAT_ID,
             from_chat_id=message.chat.id,
@@ -314,12 +323,35 @@ async def handle_user_messages(message: types.Message):
             message_thread_id=topic_id
         )
 
-        # Подтверждение пользователю
         await message.reply("✅ Ваше сообщение отправлено администрации! Вам ответят в ближайшее время.")
         
     except Exception as e:
         logging.error(f"Ошибка при пересылке в топик: {e}")
         await message.reply(f"⚠️ Не удалось переслать сообщение администрации: {e}")
+
+# --- 2. ПЕРЕСЫЛКА ОТ ОТВЕТА АДМИНА В ЛС ПОЛЬЗОВАТЕЛЮ ---
+@dp.message(F.chat.id == ADMIN_CHAT_ID, F.message_thread_id, ~F.text.startswith("/"))
+async def handle_admin_reply(message: types.Message):
+    # Игнорируем служебные системные сообщения (создание топика и т.д.)
+    if message.forum_topic_created or message.is_automatic_forward:
+        return
+
+    topic_id = message.message_thread_id
+    user_id = await get_user_by_topic(topic_id)
+
+    if not user_id:
+        return
+
+    try:
+        # Копируем сообщение администратора пользователю в ЛС
+        await bot.copy_message(
+            chat_id=user_id,
+            from_chat_id=ADMIN_CHAT_ID,
+            message_id=message.message_id
+        )
+    except Exception as e:
+        logging.error(f"Ошибка отправки ответа пользователю {user_id}: {e}")
+        await message.reply(f"⚠️ Ошибка доставки ответа пользователю: {e}")
 
 # --- ЗАПУСК БОТА ---
 async def main():
