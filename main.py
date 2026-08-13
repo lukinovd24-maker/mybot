@@ -4,6 +4,8 @@ import asyncpg
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
 
 # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
@@ -25,6 +27,10 @@ dp = Dispatcher()
 
 db_pool = None
 
+# --- СОСТОЯНИЯ ДЛЯ FSM (Запрос смены админа пользователем) ---
+class ChangeAdminState(StatesGroup):
+    waiting_for_reason = State()
+
 # --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ---
 async def init_db():
     global db_pool
@@ -37,10 +43,6 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, username TEXT, role TEXT DEFAULT 'user', is_banned BOOLEAN DEFAULT FALSE, topic_id INT, rest_until TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, user_id BIGINT, sender_type TEXT, user_msg_id INT, admin_msg_id INT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS admin_actions (id SERIAL PRIMARY KEY, admin_id BIGINT, admin_username TEXT, target_user_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-            """)
-            await conn.execute("""
-                ALTER TABLE messages ADD COLUMN IF NOT EXISTS user_msg_id INT;
-                ALTER TABLE messages ADD COLUMN IF NOT EXISTS admin_msg_id INT;
             """)
     except Exception as e:
         logger.error(f"Ошибка БД: {e}")
@@ -70,9 +72,6 @@ async def is_director_or_owner(user_id: int) -> bool:
     role = await get_user_role(user_id)
     return str(role).lower() in ["owner", "director"]
 
-async def is_owner(user_id: int) -> bool:
-    return user_id == OWNER_ID or (await get_user_role(user_id)) == "owner"
-
 # --- КОМАНДА /START ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -89,8 +88,8 @@ async def start_cmd(message: types.Message):
         "приветствую путник ты попал в прекрасный бот под названием \"вечернее сияние\".\n"
         "перед тем как начать общение, прошу заглянуть в наш тгк: https://t.me/eve_ning_glow\n"
         "там вся важная информация.\n"
-        "Прочитал? тогда пиши \"привет общение/поддержка/уни\" и к тебе придет админ.\n"
-        "удачи тебе солнышко"
+        "Прочитал? тогда пиши \"привет общение/поддержка/уни\" и к тебе придет админ.\n\n"
+        "🔄 Если хотите сменить текущего администратора, отправьте команду: /change_admin"
     )
     await message.reply(start_text, disable_web_page_preview=False)
 
@@ -102,15 +101,139 @@ async def help_cmd(message: types.Message):
 
     text = "📌 <b>Список доступных команд:</b>\n\n"
     if role == "user":
-        text += "👤 <b>Пользователям:</b>\n├ /start — Запустить бота\n└ /help — Справка по командам\n"
+        text += "👤 <b>Пользователям:</b>\n├ /start — Запустить бота\n├ /help — Справка\n└ /change_admin — Запросить смену администратора\n"
     elif role in ["admin", "intern"]:
-        text += "🛡 <b>Администрации:</b>\n├ /stats — Статистика бота\n├ /adminstats (или .астат) — Статистика взятых ПЗ\n├ /check или .чек — Проверить пользователя\n├ /ban [ID] — Заблокировать\n└ /unban [ID] — Разблокировать\n"
+        text += "🛡 <b>Администрации:</b>\n├ /stats — Статистика бота\n└ /check — Проверить пользователя\n"
     elif role == "director":
-        text += "💼 <b>Директорат:</b>\n├ /stats, /adminstats, /check\n├ /ban /unban [ID]\n├ /broadcast [текст]\n├ /rest [юз/ID] [дни]\n└ <code>.ид юз</code>\n"
+        text += "💼 <b>Директорат:</b>\n├ Одобрение смены админов\n├ /ban /unban [ID]\n└ /rest [юз/ID] [дни]\n"
     elif role == "owner":
-        text += "👑 <b>Владелец:</b>\n├ Все права управления ботом и ролями (/setdirector, /setadmin, /setintern, /demote)\n"
+        text += "👑 <b>Владелец:</b>\n├ Полный контроль ролей и бота\n"
 
     await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- ЗАПРОС СМЕНЫ АДМИНА ОТ ПОЛЬЗОВАТЕЛЯ ---
+@dp.message(Command("change_admin"))
+async def user_request_change_admin(message: types.Message, state: FSMContext):
+    if message.chat.type != "private":
+        return
+    
+    user_id = message.from_user.id
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
+            if not topic_id:
+                await message.reply("У вас еще нет активного диалога с администрацией. Сначала напишите сообщение в бот.")
+                return
+
+    await state.set_state(ChangeAdminState.waiting_for_reason)
+    await message.reply("🔄 Пожалуйста, напишите <b>причину</b>, по которой вы хотите сменить администратора:")
+
+@dp.message(ChangeAdminState.waiting_for_reason, F.chat.type == "private")
+async def process_change_reason(message: types.Message, state: FSMContext):
+    reason = message.text
+    user_id = message.from_user.id
+    full_name = message.from_user.full_name
+    username = message.from_user.username or "отсутствует"
+
+    await state.clear()
+    await message.reply("✅ Ваш запрос на смену администратора отправлен руководству. Ожидайте одобрения.")
+
+    if not db_pool or not ADMIN_CHAT_ID:
+        return
+
+    async with db_pool.acquire() as conn:
+        topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
+
+    if topic_id:
+        clean_chat_id = str(ADMIN_CHAT_ID).replace("-100", "")
+        topic_link = f"https://t.me/c/{clean_chat_id}/{topic_id}"
+
+        # Клавиатура для одобрения директором/влд
+        keyboard = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(text="✅ Одобрить смену", callback_data=f"approve_change_{user_id}"),
+                    types.InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_change_{user_id}")
+                ]
+            ]
+        )
+
+        request_text = (
+            "⚠️ <b>Запрос на смену администратора от пользователя!</b>\n\n"
+            f"👤 Пользователь: <b>{full_name}</b> (@{username}) [ID: <code>{user_id}</code>]\n"
+            f"💬 <b>Причина:</b> {reason}\n"
+            f"🔗 <a href='{topic_link}'>Перейти в топик пользователя</a>"
+        )
+
+        try:
+            # 1. Отправляем в личный топик пользователя
+            await bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                message_thread_id=topic_id,
+                text=request_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+
+            # 2. Отправляем в общий топик «Пользователи без админа»
+            if UNASSIGNED_TOPIC_ID:
+                await bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    message_thread_id=UNASSIGNED_TOPIC_ID,
+                    text=request_text,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True
+                )
+        except Exception as e:
+            logger.error(f"Ошибка отправки запроса смены админа: {e}")
+
+# --- ОБРАБОТЧИК КНОПОК ОДОБРЕНИЯ / ОТКЛОНЕНИЯ СМЕНЫ АДМИНА (Только для Директора / Владельца) ---
+@dp.callback_query(F.data.startswith("approve_change_") | F.data.startswith("reject_change_"))
+async def handle_change_decision(callback: types.CallbackQuery):
+    actor_id = callback.from_user.id
+    
+    # Проверяем, является ли пользователь директором или владельцем
+    if not await is_director_or_owner(actor_id):
+        await callback.answer("⛔️ Одобрять или отклонять смену администратора могут только Директора и Владелец!", show_alert=True)
+        return
+
+    action, target_user_id_str = callback.data.split("_")[0], callback.data.split("_")[2]
+    target_user_id = int(target_user_id_str)
+    original_text = callback.message.html_text
+
+    if action == "approve":
+        # Одобрено: сбрасываем текущего админа, делаем ПЗ свободным
+        new_status_block = "\n\n✅ <b>Статус:</b> Смена админа одобрена директором. <b>Никто не взял ПЗ</b>"
+        updated_text = original_text + new_status_block
+        
+        try:
+            # Уведомляем пользователя
+            await bot.send_message(target_user_id, "✅ Руководство одобрило смену вашего администратора. Скоро к вам подключится новый специалист!")
+        except:
+            pass
+
+        try:
+            await callback.message.edit_text(text=updated_text, parse_mode=ParseMode.HTML)
+            await callback.answer("Смена администратора одобрена!")
+        except Exception as e:
+            logger.error(f"Ошибка одобрения смены: {e}")
+
+    else:
+        # Отклонено
+        new_status_block = "\n\n❌ <b>Статус:</b> Запрос на смену админа отклонен руководством."
+        updated_text = original_text + new_status_block
+        
+        try:
+            await bot.send_message(target_user_id, "❌ Руководство отклонило ваш запрос на смену администратора.")
+        except:
+            pass
+
+        try:
+            await callback.message.edit_text(text=updated_text, parse_mode=ParseMode.HTML)
+            await callback.answer("Запрос отклонен.")
+        except Exception as e:
+            logger.error(f"Ошибка отклонения смены: {e}")
 
 # --- ПЕРЕСЫЛКА СООБЩЕНИЙ И ТОПИКИ ---
 @dp.message(F.chat.type == "private")
@@ -169,15 +292,13 @@ async def forward_user_message(message: types.Message):
             )
             keyboard = types.InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [types.InlineKeyboardButton(text="🤝 Взять пользователя", callback_data=f"take_user_{user_id}")],
-                    [types.InlineKeyboardButton(text="🔄 Сменить админа", callback_data=f"change_admin_{user_id}")]
+                    [types.InlineKeyboardButton(text="🤝 Взять пользователя", callback_data=f"take_user_{user_id}")]
                 ]
             )
             try:
                 sent_msg = await bot.send_message(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id, text=info_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
                 await bot.pin_chat_message(chat_id=ADMIN_CHAT_ID, message_id=sent_msg.message_id)
                 
-                # Отправка карточки в топик «Пользователи без админа»
                 if UNASSIGNED_TOPIC_ID:
                     clean_chat_id = str(ADMIN_CHAT_ID).replace("-100", "")
                     topic_link = f"https://t.me/c/{clean_chat_id}/{topic_id}"
@@ -196,7 +317,7 @@ async def forward_user_message(message: types.Message):
                         disable_web_page_preview=True
                     )
             except Exception as e:
-                logger.error(f"Ошибка закрепа или отправки в общий топик: {e}")
+                logger.error(f"Ошибка закрепа: {e}")
 
         try:
             copied_msg = await bot.copy_message(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id, from_chat_id=message.chat.id, message_id=message.message_id)
@@ -236,8 +357,7 @@ async def take_user_callback(callback: types.CallbackQuery):
 
     keyboard = types.InlineKeyboardMarkup(
         inline_keyboard=[
-            [types.InlineKeyboardButton(text="🤝 Взять пользователя", callback_data=f"take_user_{target_user_id}")],
-            [types.InlineKeyboardButton(text="🔄 Сменить админа", callback_data=f"change_admin_{target_user_id}")]
+            [types.InlineKeyboardButton(text="🤝 Взять пользователя", callback_data=f"take_user_{target_user_id}")]
         ]
     )
 
@@ -246,64 +366,6 @@ async def take_user_callback(callback: types.CallbackQuery):
         await callback.answer("Вы успешно взяли пользователя!")
     except Exception as e:
         logger.error(f"Ошибка кнопки взять ПЗ: {e}")
-
-# --- ОБРАБОТЧИК КНОПКИ «СМЕНИТЬ АДМИНА» ---
-@dp.callback_query(F.data.startswith("change_admin_"))
-async def change_admin_callback(callback: types.CallbackQuery):
-    target_user_id = int(callback.data.split("_")[2])
-    
-    original_text = callback.message.html_text
-    
-    if "✅ <b>Кто взял ПЗ:</b>" in original_text:
-        parts = original_text.split("✅ <b>Кто взял ПЗ:</b>")
-        base_text = parts[0].strip()
-        updated_text = f"{base_text}\n\n⚠️ <b>Кто взял ПЗ:</b> Запрошена смена администратора (Никто не взял)"
-    else:
-        updated_text = original_text + "\n\n⚠️ <b>Кто взял ПЗ:</b> Запрошена смена администратора"
-
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text="🤝 Взять пользователя", callback_data=f"take_user_{target_user_id}")],
-            [types.InlineKeyboardButton(text="🔄 Сменить админа", callback_data=f"change_admin_{target_user_id}")]
-        ]
-    )
-
-    try:
-        await callback.message.edit_text(text=updated_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-        
-        await bot.send_message(
-            chat_id=callback.message.chat.id,
-            message_thread_id=callback.message.message_thread_id,
-            text="🔔 <b>Внимание!</b> Запрошена смена администратора. ПЗ снова свободно!",
-            parse_mode=ParseMode.HTML
-        )
-
-        if UNASSIGNED_TOPIC_ID:
-            topic_id = callback.message.message_thread_id
-            clean_chat_id = str(ADMIN_CHAT_ID).replace("-100", "")
-            topic_link = f"https://t.me/c/{clean_chat_id}/{topic_id}"
-            
-            async with db_pool.acquire() as conn:
-                user_row = await conn.fetchrow("SELECT username FROM users WHERE user_id = $1;", target_user_id)
-                uname = user_row["username"] if user_row else "отсутствует"
-
-            unassigned_text = (
-                "🔄 <b>Смена администратора!</b>\n\n"
-                f"👤 Пользователь: ID <code>{target_user_id}</code> (@{uname})\n"
-                f"📌 Статус: <b>смена админа</b>\n"
-                f"🔗 <a href='{topic_link}'>Перейти в топик пользователя</a>"
-            )
-            await bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                message_thread_id=UNASSIGNED_TOPIC_ID,
-                text=unassigned_text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
-            )
-        
-        await callback.answer("Запрос на смену администратора отправлен!")
-    except Exception as e:
-        logger.error(f"Ошибка смены админа: {e}")
 
 # --- ОТВЕТЫ ИЗ ТОПИКОВ АДМИНАМИ ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
@@ -356,36 +418,6 @@ async def handle_message_reaction(event: types.MessageReactionUpdated):
                     await bot.set_message_reaction(chat_id=ADMIN_CHAT_ID, message_id=row["admin_msg_id"], reaction=[types.ReactionTypeEmoji(emoji=e) for e in new_reactions])
                 except Exception as e:
                     logger.error(f"Ошибка синхронизации реакции в админ-чат: {e}")
-
-# --- ДОП КОМАНДЫ (СТАТИСТИКА, БАНЫ И Т.Д.) ---
-@dp.message(Command("stats"))
-async def stats_cmd(message: types.Message):
-    if not await is_admin(message.from_user.id):
-        return
-    if not db_pool:
-        return
-    async with db_pool.acquire() as conn:
-        total = await conn.fetchval("SELECT COUNT(*) FROM users;") or 0
-        banned = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE;") or 0
-    await message.reply(f"📊 Всего пользователей: <b>{total}</b>\n🚫 Забанено: <b>{banned}</b>", parse_mode=ParseMode.HTML)
-
-@dp.message(Command("ban"))
-async def ban_cmd(message: types.Message, command: CommandObject):
-    if not await is_admin(message.from_user.id) or not command.args or not command.args.isdigit():
-        return
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE users SET is_banned = TRUE WHERE user_id = $1;", int(command.args))
-        await message.reply(f"🚫 Пользователь забанен.")
-
-@dp.message(Command("unban"))
-async def unban_cmd(message: types.Message, command: CommandObject):
-    if not await is_admin(message.from_user.id) or not command.args or not command.args.isdigit():
-        return
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE users SET is_banned = FALSE WHERE user_id = $1;", int(command.args))
-        await message.reply(f"🍏 Пользователь разбанен.")
 
 # --- ЗАПУСК ---
 async def main():
