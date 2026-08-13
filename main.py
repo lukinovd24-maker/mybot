@@ -63,6 +63,9 @@ async def is_director_or_owner(user_id: int) -> bool:
     role = await get_user_role(user_id)
     return str(role).lower() in ["owner", "director"]
 
+async def is_top_admin(user_id: int) -> bool:
+    return await is_director_or_owner(user_id)
+
 # --- КОМАНДА /START ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -83,6 +86,123 @@ async def start_cmd(message: types.Message):
         "удачи тебе солнышко"
     )
     await message.reply(start_text, disable_web_page_preview=False)
+
+# --- КОМАНДА /HELP ---
+@dp.message(Command("help"))
+async def help_cmd(message: types.Message):
+    user_id = message.from_user.id
+    role = await get_user_role(user_id)
+
+    text = "📌 <b>Список доступных команд:</b>\n\n"
+
+    if role == "user":
+        text += "👤 <b>Пользователям:</b>\n"
+        text += "├ /start — Запустить бота\n"
+        text += "└ /help — Справка по командам\n"
+
+    elif role in ["admin", "intern"]:
+        text += "🛡 <b>Администрации:</b>\n"
+        text += "├ /stats — Статистика бота\n"
+        text += "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
+        text += "├ /check или .чек — Проверить пользователя\n"
+        text += "├ /ban [ID] — Заблокировать пользователя\n"
+        text += "└ /unban [ID] — Разблокировать пользователя\n"
+
+    elif role == "director":
+        text += "💼 <b>Директорат:</b>\n"
+        text += "├ /stats — Статистика бота\n"
+        text += "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
+        text += "├ /check или .чек — Проверить пользователя\n"
+        text += "├ /ban /unban [ID] — Управление банами\n"
+        text += "├ /broadcast [текст] — Рассылка пользователям\n"
+        text += "├ /rest [юз/ID] [дни] — Отправить админа в отпуск\n"
+        text += "└ <code>.ид юз</code> — Узнать ID пользователя\n"
+
+    elif role == "owner":
+        text += "👑 <b>Владелец:</b>\n"
+        text += "├ /stats — Статистика бота\n"
+        text += "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
+        text += "├ /check или .чек — Проверить пользователя\n"
+        text += "├ /ban /unban [ID] — Управление банами\n"
+        text += "├ /broadcast [текст] — Рассылка\n"
+        text += "├ /rest [юз/ID] [дни] — Отправить в отпуск\n"
+        text += "├ <code>.ид юз</code> — Узнать ID пользователя\n"
+        text += "├ /setdirector [ID] — Назначить директора\n"
+        text += "├ /setadmin [ID] — Назначить администратора\n"
+        text += "├ /setintern [ID] — Назначить стажёра\n"
+        text += "├ /demote [ID] — Понизить до пользователя\n"
+        text += "└ /setowner — Подтвердить права Владельца\n"
+
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- ПРОВЕРКА ПОЛЬЗОВАТЕЛЯ (/check и .чек) ---
+async def process_check_user(message: types.Message):
+    if not await is_admin(message.from_user.id):
+        await message.reply("❌ Эта команда доступна только администрации!")
+        return
+
+    target_user_id = None
+    target_username = None
+
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("@"):
+        target_username = args[1].replace("@", "").strip()
+    elif len(args) > 1 and args[1].isdigit():
+        target_user_id = int(args[1])
+    elif message.reply_to_message:
+        if message.reply_to_message.forward_from:
+            target_user_id = message.reply_to_message.forward_from.id
+            target_username = message.reply_to_message.forward_from.username
+        elif message.message_thread_id and db_pool:
+            async with db_pool.acquire() as conn:
+                target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
+    elif message.message_thread_id and db_pool:
+        async with db_pool.acquire() as conn:
+            target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
+
+    if not db_pool:
+        await message.reply("⚠️ База данных недоступна!")
+        return
+
+    async with db_pool.acquire() as conn:
+        if target_username and not target_user_id:
+            row = await conn.fetchrow("SELECT user_id, username, role, is_banned, topic_id, rest_until FROM users WHERE LOWER(username) = LOWER($1);", target_username)
+        elif target_user_id:
+            row = await conn.fetchrow("SELECT user_id, username, role, is_banned, topic_id, rest_until FROM users WHERE user_id = $1;", target_user_id)
+        else:
+            row = None
+
+        if not row:
+            await message.reply("⚠️ Пользователь не найден в базе данных бота.", parse_mode=ParseMode.HTML)
+            return
+
+        user_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE user_id = $1 AND sender_type = 'user';", row["user_id"]) or 0
+        admin_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE user_id = $1 AND sender_type = 'admin';", row["user_id"]) or 0
+
+    status = "🚫 Забанен" if row["is_banned"] else "🍏 Активен"
+    rest_info = f"🏖 В отпуске до {row['rest_until'].strftime('%Y-%m-%d %H:%M')}" if row["rest_until"] and row["rest_until"] > datetime.now() else "Нет"
+    
+    text = (
+        "🔍 👤 <b>Подробная проверка пользователя:</b>\n\n"
+        f"🆔 Telegram ID: <code>{row['user_id']}</code>\n"
+        f"👤 Юзернейм: @{row['username'] or 'отсутствует'}\n"
+        f"🎭 Роль в боте: <b>{row['role']}</b>\n"
+        f"📌 Статус: <b>{status}</b>\n"
+        f"🏖 Отпуск: <b>{rest_info}</b>\n"
+        f"📁 ID топика: <code>{row['topic_id'] or 'нет топика'}</code>\n\n"
+        "✉️ <b>Статистика диалога:</b>\n"
+        f"├ Сообщений от юзера: <b>{user_msgs}</b>\n"
+        f"└ Ответов от админов: <b>{admin_msgs}</b>"
+    )
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+@dp.message(F.text.lower().startswith(".чек"))
+async def check_user_by_dot(message: types.Message):
+    await process_check_user(message)
+
+@dp.message(Command("check"))
+async def check_user_by_command(message: types.Message):
+    await process_check_user(message)
 
 # --- ПОЛНАЯ СТАТИСТИКА БОТА (/stats) ---
 @dp.message(Command("stats"))
