@@ -125,7 +125,6 @@ async def start_cmd(message: types.Message):
 async def help_cmd(message: types.Message):
     user_id = message.from_user.id
     
-    # Определяем реальную роль для показа корректной справки
     role = "user"
     if user_id == OWNER_ID:
         role = "owner"
@@ -137,13 +136,11 @@ async def help_cmd(message: types.Message):
 
     text = "📌 <b>Список доступных команд:</b>\n\n"
 
-    # 1. Меню для обычных пользователей
     if role == "user":
         text += "👤 <b>Пользователям:</b>\n"
         text += "├ /start — Запустить бота\n"
         text += "└ /help — Справка по командам\n"
 
-    # 2. Меню для стажёров и администраторов
     elif role in ["admin", "intern"]:
         text += "🛡 <b>Администрации:</b>\n"
         text += "├ /stats — Статистика бота\n"
@@ -151,7 +148,6 @@ async def help_cmd(message: types.Message):
         text += "├ /ban [ID] — Заблокировать пользователя\n"
         text += "└ /unban [ID] — Разблокировать пользователя\n"
 
-    # 3. Меню для директоров
     elif role == "director":
         text += "💼 <b>Директорат:</b>\n"
         text += "├ /stats — Статистика бота\n"
@@ -161,7 +157,6 @@ async def help_cmd(message: types.Message):
         text += "├ /rest [юз/ID] [дни] — Отправить админа в отпуск\n"
         text += "└ <code>.ид юз</code> — Узнать ID пользователя\n"
 
-    # 4. Меню для главного владельца
     elif role == "owner":
         text += "👑 <b>Владелец:</b>\n"
         text += "├ /stats — Статистика бота\n"
@@ -183,7 +178,6 @@ async def help_cmd(message: types.Message):
 async def rest_cmd(message: types.Message, command: CommandObject):
     user_id = message.from_user.id
     
-    # Только владелец или директор могут выдавать отпуск
     if not await is_director_or_owner(user_id):
         await message.reply("❌ У вас нет доступа к этой команде. Отправлять в отпуск может только руководство.")
         return
@@ -373,12 +367,21 @@ async def change_role(message: types.Message, command: CommandObject, new_role: 
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET role = $1 WHERE user_id = $2;", new_role, target_id)
             
-            # Получаем имя/юзернейм пользователя для красивого отчета
             target_row = await conn.fetchrow("SELECT username FROM users WHERE user_id = $1;", target_id)
             target_name = f"@{target_row['username']}" if target_row and target_row["username"] else f"ID: {target_id}"
 
-        # Отправляем сообщение в чат об изменении роли
+        # 1. Отчет в чат
         await message.reply(f"✅ Пользователь <b>{target_name}</b> (<code>{target_id}</code>) назначен на должность: <b>{role_name}</b>", parse_mode=ParseMode.HTML)
+
+        # 2. Уведомление в ЛС пользователю
+        try:
+            await bot.send_message(
+                target_id, 
+                f"🎉 Поздравляем! Ваша новая должность в боте: <b>{role_name}</b>.", 
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление в ЛС пользователю {target_id}: {e}")
 
 @dp.message(Command("setdirector"))
 async def set_director_cmd(message: types.Message, command: CommandObject):
