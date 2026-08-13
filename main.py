@@ -12,14 +12,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # Твой Telegram ID — Главный Владелец
 OWNER_ID = 8674242517
 
-# --- ССЫЛКИ ИЛИ FILE_ID КАРТИНОК ДЛЯ КАЖДОЙ РОЛИ ---
-# Вставь сюда полученные file_id вместо текста в кавычках:
+# --- FILE_ID КАРТИНОК ДЛЯ КАЖДОЙ РОЛИ ---
 ROLE_IMAGES = {
-    "owner": "https://via.placeholder.com/800x600.png?text=Owner",       # Картинка для Владельца
-    "director": "https://via.placeholder.com/800x600.png?text=Director", # Картинка для Директора
-    "admin": "https://via.placeholder.com/800x600.png?text=Admin",       # Картинка для Админа
-    "intern": "https://via.placeholder.com/800x600.png?text=Intern",     # Картинка для Стажёра
-    "user": "https://via.placeholder.com/800x600.png?text=User"          # Картинка для Пользователя
+    "owner": "AgACAgEAAyEFAAMBBfhjBAADAmp9dVI8vdVmrsan-2KbKw6VSnhNAALODGsbVX3xR6JqNvy31JNfAQADAgADeAADPQQ",
+    "director": "AgACAgEAAyEFAAMBBfhjBAADA2p9dVITraxlKk80Pjsmo4BcFRRaAALPDGsbVX3xRz6rUFLATrZUAQADAgADeAADPQQ",
+    "admin": "AgACAgEAAyEFAAMBBfhjBAADBGp9dVLL-nSsXqZHigTHjc_WaYy-AALQDGsbVX3xR-swwTZ6AAGZoAEAAwIAA3gAAz0E",
+    "intern": "AgACAgEAAyEFAAMBBfhjBAADBWp9dVKOSnt5hdtpqHBmepXxOi-mAALRDGsbVX3xRzjICoP46KtYAQADAgADeAADPQQ",
+    "user": "AgACAgEAAyEFAAMBBfhjBAADBWp9dVKOSnt5hdtpqHBmepXxOi-mAALRDGsbVX3xRzjICoP46KtYAQADAgADeAADPQQ"
 }
 
 if not BOT_TOKEN:
@@ -75,7 +74,6 @@ def extract_target_user_id(message: types.Message) -> int | None:
 # --- ПОЛУЧЕНИЕ FILE_ID КАРТИНОК (Только для тебя) ---
 @dp.message(F.photo, F.from_user.id == OWNER_ID)
 async def get_photo_file_id(message: types.Message):
-    # Самое высокое качество фото всегда последнее в списке [-1]
     photo_id = message.photo[-1].file_id
     await message.reply(
         f"🖼 **`file_id` твоей картинки:**\n\n"
@@ -97,7 +95,6 @@ async def start_cmd(message: types.Message):
         "user": "👤 Пользователь"
     }
     
-    # Берем нужную картинку
     photo = ROLE_IMAGES.get(role, ROLE_IMAGES["user"])
     
     caption_text = (
@@ -108,7 +105,6 @@ async def start_cmd(message: types.Message):
     try:
         await message.answer_photo(photo=photo, caption=caption_text, parse_mode="Markdown")
     except Exception:
-        # Если картинка не загрузилась — отправляем просто текст
         await message.answer(caption_text, parse_mode="Markdown")
 
 # --- УПРАВЛЕНИЕ РОЛЯМИ ---
