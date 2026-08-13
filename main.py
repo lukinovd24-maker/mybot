@@ -12,6 +12,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # Твой Telegram ID — Главный Владелец
 OWNER_ID = 8674242517
 
+# ID группы/чата админов (если группы нет, укажи свой OWNER_ID)
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", OWNER_ID))
+
 # --- FILE_ID КАРТИНОК ДЛЯ КАЖДОЙ РОЛИ ---
 ROLE_IMAGES = {
     "owner": "AgACAgEAAyEFAAMBBfhjBAADAmp9dVI8vdVmrsan-2KbKw6VSnhNAALODGsbVX3xR6JqNvy31JNfAQADAgADeAADPQQ",
@@ -71,14 +74,13 @@ def extract_target_user_id(message: types.Message) -> int | None:
         return int(args[1])
     return None
 
-# Вспомогательная функция для отправки уведомлений пользователю
 async def notify_user(user_id: int, text: str):
     try:
         await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
     except Exception as e:
         logging.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
 
-# --- ПОЛУЧЕНИЕ FILE_ID КАРТИНОК В ЛИЧКЕ БОТА (Только для Владельца) ---
+# --- ПОЛУЧЕНИЕ FILE_ID КАРТИНОК (Только для Владельца) ---
 @dp.message(F.photo, F.from_user.id == OWNER_ID)
 async def get_photo_file_id(message: types.Message):
     photo_id = message.photo[-1].file_id
@@ -89,7 +91,7 @@ async def get_photo_file_id(message: types.Message):
         parse_mode="HTML"
     )
 
-# --- КОМАНДА /START С КАРТИНКАМИ ---
+# --- КОМАНДА /START ---
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     role = await get_user_role(message.from_user.id)
@@ -104,12 +106,12 @@ async def start_cmd(message: types.Message):
     }
     
     photo = ROLE_IMAGES.get(role, ROLE_IMAGES["user"])
-    
     full_name = message.from_user.full_name.replace("<", "&lt;").replace(">", "&gt;")
     
     caption_text = (
         f"👋 <b>Привет, {full_name}!</b>\n\n"
-        f"Твой статус в системе: <b>{role_names.get(role, '👤 Пользователь')}</b>"
+        f"Твой статус в системе: <b>{role_names.get(role, '👤 Пользователь')}</b>\n\n"
+        f"💬 <i>Если у вас есть вопрос — просто напишите его в этот чат, и наши администраторы вам ответят!</i>"
     )
 
     try:
@@ -118,13 +120,41 @@ async def start_cmd(message: types.Message):
         logging.error(f"Ошибка при отправке фото: {e}")
         await message.answer(caption_text, parse_mode="HTML")
 
-# --- УПРАВЛЕНИЕ РОЛЯМИ С УВЕДОМЛЕНИЯМИ ---
+# --- КОМАНДА /STATS (СТАТИСТИКА) ---
+@dp.message(Command("stats"))
+async def stats_cmd(message: types.Message):
+    user_role = await get_user_role(message.from_user.id)
+    if user_role not in ["owner", "director", "admin"]:
+        await message.reply("❌ Просматривать статистику могут только Администраторы, Директора и Владелец!")
+        return
 
-# 1. Назначение Директора
+    if not db_pool:
+        await message.reply("⚠️ База данных недоступна.")
+        return
+
+    async with db_pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users;")
+        directors = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'director';")
+        admins = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';")
+        interns = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';")
+        users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'user';")
+
+    text = (
+        "📊 <b>Статистика пользователей бота:</b>\n\n"
+        f"👥 Всего пользователей в БД: <b>{total_users}</b>\n\n"
+        f"👑 Владелец: <b>1</b>\n"
+        f"💼 Директоров: <b>{directors}</b>\n"
+        f"🛡 Администраторов: <b>{admins}</b>\n"
+        f"🔰 Стажёров: <b>{interns}</b>\n"
+        f"👤 Обычных пользователей: <b>{users}</b>"
+    )
+    await message.reply(text, parse_mode="HTML")
+
+# --- УПРАВЛЕНИЕ РОЛЯМИ ---
 @dp.message(Command("set_director"))
 async def set_director_cmd(message: types.Message):
     if message.from_user.id != OWNER_ID:
-        await message.reply("❌ На назначать Директоров может только Владелец бота!")
+        await message.reply("❌ Назначать Директоров может только Владелец бота!")
         return
 
     target_id = extract_target_user_id(message)
@@ -134,11 +164,8 @@ async def set_director_cmd(message: types.Message):
 
     await set_user_role(target_id, None, "director")
     await message.reply(f"✅ Пользователю <code>{target_id}</code> присвоена роль <b>Директор</b> 💼", parse_mode="HTML")
-    
-    # Уведомление пользователю
     await notify_user(target_id, "🎉 <b>Поздравляем!</b> Вам присвоена должность <b>Директора</b> 💼")
 
-# 2. Назначение Администратора
 @dp.message(Command("set_admin"))
 async def set_admin_cmd(message: types.Message):
     user_role = await get_user_role(message.from_user.id)
@@ -153,11 +180,8 @@ async def set_admin_cmd(message: types.Message):
 
     await set_user_role(target_id, None, "admin")
     await message.reply(f"✅ Пользователю <code>{target_id}</code> присвоена роль <b>Администратор</b> 🛡", parse_mode="HTML")
-    
-    # Уведомление пользователю
     await notify_user(target_id, "🎉 <b>Поздравляем!</b> Вам присвоена должность <b>Администратора</b> 🛡")
 
-# 3. Назначение Стажёра
 @dp.message(Command("set_intern"))
 async def set_intern_cmd(message: types.Message):
     user_role = await get_user_role(message.from_user.id)
@@ -172,11 +196,8 @@ async def set_intern_cmd(message: types.Message):
 
     await set_user_role(target_id, None, "intern")
     await message.reply(f"✅ Пользователю <code>{target_id}</code> присвоена роль <b>Стажёр</b> 🔰", parse_mode="HTML")
-    
-    # Уведомление пользователю
     await notify_user(target_id, "🎉 <b>Поздравляем!</b> Вам присвоена должность <b>Стажёра</b> 🔰")
 
-# 4. Снятие роли (Увольнение)
 @dp.message(Command("demote"))
 async def demote_cmd(message: types.Message):
     user_role = await get_user_role(message.from_user.id)
@@ -195,9 +216,29 @@ async def demote_cmd(message: types.Message):
 
     await set_user_role(target_id, None, "user")
     await message.reply(f"🗑 Роль с пользователя <code>{target_id}</code> снята.", parse_mode="HTML")
-    
-    # Уведомление об увольнении
     await notify_user(target_id, "⚠️ <b>Уведомление:</b> Вы были сняты со своей должности в системе.")
+
+# --- ПЕРЕСЫЛКА СООБЩЕНИЙ ПОЛЬЗОВАТЕЛЕЙ В АДМИН-ЧАТ И ОТВЕТЫ ---
+@dp.message(F.chat.type == "private", ~F.text.startswith("/"))
+async def handle_user_messages(message: types.Message):
+    user_role = await get_user_role(message.from_user.id)
+    
+    # Записываем пользователя в БД
+    await set_user_role(message.from_user.id, message.from_user.username, user_role)
+    
+    # Пересылаем сообщение администраторам
+    try:
+        header = (
+            f"📩 <b>Новое сообщение в техподдержку!</b>\n"
+            f"👤 От: {message.from_user.full_name} (@{message.from_user.username or 'нет_юзернейма'})\n"
+            f"🆔 ID: <code>{message.from_user.id}</code>\n\n"
+            f"💬 <b>Текст:</b> {message.text}"
+        )
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, text=header, parse_mode="HTML")
+        await message.reply("✅ Ваше сообщение отправлено администрации! Вам ответят в ближайшее время.")
+    except Exception as e:
+        logging.error(f"Ошибка при пересылке сообщения: {e}")
+        await message.reply("⚠️ Не удалось переслать сообщение администрации.")
 
 # --- ЗАПУСК БОТА ---
 async def main():
