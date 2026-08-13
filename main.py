@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncpg
+from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
@@ -39,10 +40,12 @@ async def init_db():
                     username TEXT,
                     role TEXT DEFAULT 'user',
                     is_banned BOOLEAN DEFAULT FALSE,
-                    topic_id INT
+                    topic_id INT,
+                    rest_until TIMESTAMP
                 );
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS topic_id INT;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS rest_until TIMESTAMP;
 
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
@@ -57,7 +60,7 @@ async def init_db():
         db_error_msg = str(e)
         logging.error(f"Ошибка подключения к БД: {e}")
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И РОЛИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ПРОВЕРКА ОТПУСКА ---
 async def get_user_role(user_id: int) -> str:
     if user_id == OWNER_ID:
         return "owner"
@@ -65,9 +68,22 @@ async def get_user_role(user_id: int) -> str:
         return "user"
     try:
         async with db_pool.acquire() as conn:
-            role = await conn.fetchval("SELECT role FROM users WHERE user_id = $1;", user_id)
-            logging.info(f"🔍 Проверка роли для {user_id}: найдена роль -> {role}")
-            return role or "user"
+            row = await conn.fetchrow("SELECT role, rest_until FROM users WHERE user_id = $1;", user_id)
+            if not row:
+                return "user"
+            
+            # Проверяем, не на отдыхе ли пользователь
+            rest_until = row["rest_until"]
+            if rest_until:
+                # Сравниваем с текущим временем (UTC)
+                if rest_until > datetime.now(timezone.utc):
+                    # Если в отпуске, то для системы прав он временно обычный юзер
+                    return "user"
+                else:
+                    # Отпуск закончился — очищаем поле в базе
+                    await conn.execute("UPDATE users SET rest_until = NULL WHERE user_id = $1;", user_id)
+
+            return row["role"] or "user"
     except Exception as e:
         logging.error(f"❌ Ошибка при получении роли для {user_id}: {e}")
         return "user"
@@ -76,9 +92,12 @@ async def is_admin(user_id: int) -> bool:
     role = await get_user_role(user_id)
     return str(role).lower() in ["owner", "director", "admin", "intern"]
 
-async def is_top_admin(user_id: int) -> bool:
+async def is_director_or_owner(user_id: int) -> bool:
     role = await get_user_role(user_id)
     return str(role).lower() in ["owner", "director"]
+
+async def is_top_admin(user_id: int) -> bool:
+    return await is_director_or_owner(user_id)
 
 # --- КОМАНДА /START ---
 @dp.message(Command("start"))
@@ -101,39 +120,114 @@ async def start_cmd(message: types.Message):
     )
     await message.reply(start_text, disable_web_page_preview=False)
 
-# --- КОМАНДА /HELP ---
+# --- РАЗДЕЛЕННЫЙ /HELP ---
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
     user_id = message.from_user.id
-    user_is_admin = await is_admin(user_id)
-    user_is_top = await is_top_admin(user_id)
     
+    # Определяем реальную роль для показа корректной справки
+    role = "user"
+    if user_id == OWNER_ID:
+        role = "owner"
+    elif db_pool:
+        async with db_pool.acquire() as conn:
+            r = await conn.fetchval("SELECT role FROM users WHERE user_id = $1;", user_id)
+            if r:
+                role = str(r).lower()
+
     text = "📌 <b>Список доступных команд:</b>\n\n"
-    text += "👤 <b>Пользователям:</b>\n"
-    text += "├ /start — Запустить бота\n"
-    text += "└ /help — Справка по командам\n\n"
-    
-    if user_is_admin:
+
+    # 1. Меню для обычных пользователей
+    if role == "user":
+        text += "👤 <b>Пользователям:</b>\n"
+        text += "├ /start — Запустить бота\n"
+        text += "└ /help — Справка по командам\n"
+
+    # 2. Меню для стажёров и администраторов
+    elif role in ["admin", "intern"]:
         text += "🛡 <b>Администрации:</b>\n"
         text += "├ /stats — Статистика бота\n"
         text += "├ /check или .чек — Проверить пользователя\n"
         text += "├ /ban [ID] — Заблокировать пользователя\n"
-        text += "├ /unban [ID] — Разблокировать пользователя\n"
+        text += "└ /unban [ID] — Разблокировать пользователя\n"
+
+    # 3. Меню для директоров
+    elif role == "director":
+        text += "💼 <b>Директорат:</b>\n"
+        text += "├ /stats — Статистика бота\n"
+        text += "├ /check или .чек — Проверить пользователя\n"
+        text += "├ /ban /unban [ID] — Управление банами\n"
         text += "├ /broadcast [текст] — Рассылка пользователям\n"
+        text += "├ /rest [юз/ID] [дни] — Отправить админа в отпуск\n"
+        text += "└ <code>.ид юз</code> — Узнать ID пользователя\n"
+
+    # 4. Меню для главного владельца
+    elif role == "owner":
+        text += "👑 <b>Владелец:</b>\n"
+        text += "├ /stats — Статистика бота\n"
+        text += "├ /check или .чек — Проверить пользователя\n"
+        text += "├ /ban /unban [ID] — Управление банами\n"
+        text += "├ /broadcast [текст] — Рассылка\n"
+        text += "├ /rest [юз/ID] [дни] — Отправить в отпуск\n"
+        text += "├ <code>.ид юз</code> — Узнать ID пользователя\n"
         text += "├ /setdirector [ID] — Назначить директора\n"
         text += "├ /setadmin [ID] — Назначить администратора\n"
         text += "├ /setintern [ID] — Назначить стажёра\n"
-        text += "└ /demote [ID] — Снять роль до пользователя\n\n"
-
-    if user_is_top:
-        text += "🔑 <b>Владельцу и Директору:</b>\n"
-        text += "└ <code>.ид юз</code> или <code>.ид @username</code> — Узнать ID пользователя\n\n"
-        
-    if user_id == OWNER_ID:
-        text += "👑 <b>Владельцу:</b>\n"
-        text += "└ /setowner — Подтвердить права Владельца в БД\n"
+        text += "├ /demote [ID] — Понизить до пользователя\n"
+        text += "└ /setowner — Подтвердить права Владельца\n"
 
     await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- СИСТЕМА ОТПУСКОВ (/rest) ---
+@dp.message(Command("rest"))
+async def rest_cmd(message: types.Message, command: CommandObject):
+    user_id = message.from_user.id
+    
+    # Только владелец или директор могут выдавать отпуск
+    if not await is_director_or_owner(user_id):
+        await message.reply("❌ У вас нет доступа к этой команде. Отправлять в отпуск может только руководство.")
+        return
+
+    args = (command.args or "").split()
+    if len(args) < 2:
+        await message.reply(
+            "⚠️ Неверный формат команды.\n"
+            "Используйте: <code>/rest @username дни</code> или <code>/rest ID дни</code>", 
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    target_raw = args[0]
+    try:
+        days = int(args[1])
+    except ValueError:
+        await message.reply("⚠️ Неверно указано количество дней. Пример: <code>/rest @user 5</code> или <code>/rest 12345678 5</code>", parse_mode=ParseMode.HTML)
+        return
+
+    if not db_pool:
+        return
+
+    async with db_pool.acquire() as conn:
+        if target_raw.startswith("@"):
+            username_clean = target_raw.replace("@", "").strip()
+            row = await conn.fetchrow("SELECT user_id, username FROM users WHERE LOWER(username) = LOWER($1);", username_clean)
+        elif target_raw.isdigit():
+            target_id = int(target_raw)
+            row = await conn.fetchrow("SELECT user_id, username FROM users WHERE user_id = $1;", target_id)
+        else:
+            row = None
+
+        if not row:
+            await message.reply("⚠️ Пользователь не найден в базе данных.")
+            return
+        
+        target_id = row["user_id"]
+        target_name = f"@{row['username']}" if row["username"] else f"ID: {target_id}"
+
+        rest_until_date = datetime.now(timezone.utc) + timedelta(days=days)
+        await conn.execute("UPDATE users SET rest_until = $1 WHERE user_id = $2;", rest_until_date, target_id)
+
+    await message.reply(f"🏖 Пользователь <b>{target_name}</b> уходит в отпуск на <b>{days} дней</b>. Его полномочия временно заморожены.", parse_mode=ParseMode.HTML)
 
 # --- ЛОГИКА УЗНАТЬ ID ---
 async def process_get_user_id(message: types.Message):
@@ -227,9 +321,9 @@ async def process_check_user(message: types.Message):
 
     async with db_pool.acquire() as conn:
         if target_username and not target_user_id:
-            row = await conn.fetchrow("SELECT user_id, username, role, is_banned, topic_id FROM users WHERE LOWER(username) = LOWER($1);", target_username)
+            row = await conn.fetchrow("SELECT user_id, username, role, is_banned, topic_id, rest_until FROM users WHERE LOWER(username) = LOWER($1);", target_username)
         elif target_user_id:
-            row = await conn.fetchrow("SELECT user_id, username, role, is_banned, topic_id FROM users WHERE user_id = $1;", target_user_id)
+            row = await conn.fetchrow("SELECT user_id, username, role, is_banned, topic_id, rest_until FROM users WHERE user_id = $1;", target_user_id)
         else:
             row = None
 
@@ -241,6 +335,7 @@ async def process_check_user(message: types.Message):
         admin_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE user_id = $1 AND sender_type = 'admin';", row["user_id"]) or 0
 
     status = "🚫 Забанен" if row["is_banned"] else "🍏 Активен"
+    rest_info = f"🏖 В отпуске до {row['rest_until'].strftime('%Y-%m-%d %H:%M')}" if row["rest_until"] and row["rest_until"] > datetime.now(timezone.utc) else "Нет"
     
     text = (
         "🔍 👤 <b>Подробная проверка пользователя:</b>\n\n"
@@ -248,6 +343,7 @@ async def process_check_user(message: types.Message):
         f"👤 Юзернейм: @{row['username'] or 'отсутствует'}\n"
         f"🎭 Роль в боте: <b>{row['role']}</b>\n"
         f"📌 Статус: <b>{status}</b>\n"
+        f"🏖 Отпуск: <b>{rest_info}</b>\n"
         f"📁 ID топика: <code>{row['topic_id'] or 'нет топика'}</code>\n\n"
         "✉️ <b>Статистика диалога:</b>\n"
         f"├ Сообщений от юзера: <b>{user_msgs}</b>\n"
@@ -276,7 +372,13 @@ async def change_role(message: types.Message, command: CommandObject, new_role: 
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET role = $1 WHERE user_id = $2;", new_role, target_id)
-        await message.reply(f"✅ Пользователю <code>{target_id}</code> выдан статус: <b>{role_name}</b>", parse_mode=ParseMode.HTML)
+            
+            # Получаем имя/юзернейм пользователя для красивого отчета
+            target_row = await conn.fetchrow("SELECT username FROM users WHERE user_id = $1;", target_id)
+            target_name = f"@{target_row['username']}" if target_row and target_row["username"] else f"ID: {target_id}"
+
+        # Отправляем сообщение в чат об изменении роли
+        await message.reply(f"✅ Пользователь <b>{target_name}</b> (<code>{target_id}</code>) назначен на должность: <b>{role_name}</b>", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("setdirector"))
 async def set_director_cmd(message: types.Message, command: CommandObject):
