@@ -112,27 +112,201 @@ async def help_cmd(message: types.Message):
     user_id = message.from_user.id
     role = await get_user_role(user_id)
 
-    text = "📌 <b>Список доступных команд:</b>\n\n"
-    if role == "user":
-        text += "👤 <b>Пользователям:</b>\n├ /start — Запустить бота\n├ /help — Справка\n└ /change_admin — Запросить смену администратора\n"
-    elif role in ["admin", "intern"]:
-        text += "🛡 <b>Администрации:</b>\n├ /stats — Статистика бота\n└ /check — Проверить пользователя\n"
-    elif role == "director":
-        text += "💼 <b>Директорат:</b>\n├ Одобрение смены админов\n├ /ban /unban [ID]\n└ /rest [юз/ID] [дни]\n"
-    
-    # Для владельца выводим полный список
-    if role == "owner" or user_id == OWNER_ID:
-        text += (
-            "👑 <b>Владелец:</b>\n"
-            "├ /setdirector [ID/юз] — Назначить директором\n"
-            "├ /setadmin [ID/юз] — Назначить администратором\n"
-            "├ /setintern [ID/юз] — Назначить стажером\n"
-            "├ /demote [ID/юз] — Снять с должности\n"
-            "├ /ban /unban [ID] — Бан/разбан\n"
-            "└ /stats — Статистика\n"
-        )
+    text = (
+        "📌 <b>Список доступных команд:</b>\n\n"
+        "👑 <b>Владелец:</b>\n"
+        "├ /stats — Статистика бота\n"
+        "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
+        "├ /check или .чек — Проверить пользователя\n"
+        "├ /ban /unban [ID] — Управление банами\n"
+        "├ /broadcast [текст] — Рассылка\n"
+        "├ /rest [юз/ID] [дни] — Отправить в отпуск\n"
+        "├ .ид юз — Узнать ID пользователя\n"
+        "├ /setdirector [ID] — Назначить директора\n"
+        "├ /setadmin [ID] — Назначить администратора\n"
+        "├ /setintern [ID] — Назначить стажёра\n"
+        "├ /demote [ID] — Понизить до пользователя\n"
+        "└ /setowner — Подтвердить права Владельца"
+    )
 
     await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ ДЛЯ АДМИНИСТРАЦИИ И ВЛАДЕЛЬЦА ---
+
+@dp.message(Command("stats"))
+async def stats_cmd(message: types.Message):
+    if not await is_admin(message.from_user.id):
+        return
+    if not db_pool:
+        await message.reply("База данных недоступна.")
+        return
+    async with db_pool.acquire() as conn:
+        users_count = await conn.fetchval("SELECT COUNT(*) FROM users;")
+        banned_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE;")
+        msgs_count = await conn.fetchval("SELECT COUNT(*) FROM messages;")
+    
+    text = (
+        "📊 <b>Статистика бота:</b>\n\n"
+        f"👥 Всего пользователей: <b>{users_count}</b>\n"
+        f"🚫 Заблокировано: <b>{banned_count}</b>\n"
+        f"💬 Всего сообщений: <b>{msgs_count}</b>"
+    )
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("adminstats"), F.chat.id == ADMIN_CHAT_ID)
+async def adminstats_cmd(message: types.Message):
+    if not await is_admin(message.from_user.id):
+        return
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT admin_username, COUNT(*) as cnt 
+            FROM admin_actions 
+            GROUP BY admin_username 
+            ORDER BY cnt DESC LIMIT 10;
+        """)
+    if not rows:
+        await message.reply("📈 Статистика взятых ПЗ пока пуста.")
+        return
+    
+    text = "📈 <b>Топ администраторов по взятым ПЗ:</b>\n\n"
+    for idx, r in enumerate(rows, 1):
+        text += f"{idx}. @{r['admin_username']} — <b>{r['cnt']}</b>\n"
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+@dp.message(F.text.startswith(".астат"), F.chat.id == ADMIN_CHAT_ID)
+async def adminstats_dot_cmd(message: types.Message):
+    await adminstats_cmd(message)
+
+@dp.message(Command("check"), F.chat.id == ADMIN_CHAT_ID)
+async def check_cmd(message: types.Message, command: CommandObject):
+    if not await is_admin(message.from_user.id):
+        return
+    if not db_pool:
+        return
+    
+    target_id = None
+    if command.args:
+        async with db_pool.acquire() as conn:
+            target_id = await get_target_user_id(conn, command.args)
+    elif message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        if message.reply_to_message.from_user.id == bot.id and message.reply_to_message.text:
+            import re
+            match = re.search(r"ID:\s*<code>(\d+)<\/code>", message.reply_to_message.text)
+            if match:
+                target_id = int(match.group(1))
+
+    if not target_id:
+        await message.reply("❌ Укажите ID, юзернейм или ответьте на сообщение пользователя.")
+        return
+
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1;", target_id)
+    
+    if not user:
+        await message.reply("❌ Пользователь не найден в базе данных.")
+        return
+
+    text = (
+        "🔍 <b>Информация о пользователе:</b>\n\n"
+        f"🆔 ID: <code>{user['user_id']}</code>\n"
+        f"👤 Юзернейм: @{user['username'] or 'отсутствует'}\n"
+        f"🛡 Роль: <b>{user['role']}</b>\n"
+        f"🚫 Забанен: <b>{'Да' if user['is_banned'] else 'Нет'}</b>\n"
+        f"🌴 Отпуск до: {user['rest_until'] or 'Нет'}"
+    )
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+@dp.message(F.text.startswith(".чек"), F.chat.id == ADMIN_CHAT_ID)
+async def check_dot_cmd(message: types.Message, command: CommandObject):
+    await check_cmd(message, command)
+
+@dp.message(Command("ban"), F.chat.id == ADMIN_CHAT_ID)
+async def ban_cmd(message: types.Message, command: CommandObject):
+    if not await is_director_or_owner(message.from_user.id):
+        return
+    if not db_pool or not command.args:
+        await message.reply("❌ Укажите ID или юзернейм для бана.")
+        return
+    async with db_pool.acquire() as conn:
+        target_id = await get_target_user_id(conn, command.args)
+        if not target_id:
+            await message.reply("❌ Пользователь не найден.")
+            return
+        await conn.execute("UPDATE users SET is_banned = TRUE WHERE user_id = $1;", target_id)
+        await message.reply(f"🚫 Пользователь <code>{target_id}</code> заблокирован.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("unban"), F.chat.id == ADMIN_CHAT_ID)
+async def unban_cmd(message: types.Message, command: CommandObject):
+    if not await is_director_or_owner(message.from_user.id):
+        return
+    if not db_pool or not command.args:
+        await message.reply("❌ Укажите ID или юзернейм для разбана.")
+        return
+    async with db_pool.acquire() as conn:
+        target_id = await get_target_user_id(conn, command.args)
+        if not target_id:
+            await message.reply("❌ Пользователь не найден.")
+            return
+        await conn.execute("UPDATE users SET is_banned = FALSE WHERE user_id = $1;", target_id)
+        await message.reply(f"✅ Пользователь <code>{target_id}</code> разблокирован.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("broadcast"), F.chat.id == ADMIN_CHAT_ID)
+async def broadcast_cmd(message: types.Message, command: CommandObject):
+    if not await is_owner(message.from_user.id) or not command.args:
+        return
+    if not db_pool:
+        return
+    
+    text = command.args
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT user_id FROM users WHERE is_banned = FALSE;")
+    
+    success, failed = 0, 0
+    for u in users:
+        try:
+            await bot.send_message(u["user_id"], text)
+            success += 1
+        except:
+            failed += 1
+    await message.reply(f"📢 Рассылка завершена!\n✅ Успешно: {success}\n❌ Ошибок: {failed}")
+
+@dp.message(Command("rest"), F.chat.id == ADMIN_CHAT_ID)
+async def rest_cmd(message: types.Message, command: CommandObject):
+    if not await is_director_or_owner(message.from_user.id) or not command.args:
+        return
+    args = command.args.split()
+    if len(args) < 2:
+        await message.reply("❌ Формат: /rest [юз/ID] [дни]")
+        return
+    
+    target_arg, days_arg = args[0], args[1]
+    if not days_arg.isdigit():
+        await message.reply("❌ Количество дней должно быть числом.")
+        return
+    
+    days = int(days_arg)
+    rest_until = datetime.now() + timedelta(days=days)
+
+    async with db_pool.acquire() as conn:
+        target_id = await get_target_user_id(conn, target_arg)
+        if not target_id:
+            await message.reply("❌ Пользователь не найден.")
+            return
+        await conn.execute("UPDATE users SET rest_until = $1 WHERE user_id = $2;", rest_until, target_id)
+        await message.reply(f"🌴 Администратор <code>{target_id}</code> отправлен в отпуск на {days} дн.", parse_mode=ParseMode.HTML)
+
+@dp.message(F.text.startswith(".ид"), F.chat.id == ADMIN_CHAT_ID)
+async def get_id_dot_cmd(message: types.Message):
+    if not await is_admin(message.from_user.id):
+        return
+    if message.reply_to_message:
+        target = message.reply_to_message.from_user
+        await message.reply(f"🆔 ID пользователя {target.full_name}: <code>{target.id}</code>", parse_mode=ParseMode.HTML)
+    else:
+        await message.reply("❌ Ответьте на сообщение пользователя.")
 
 # --- УПРАВЛЕНИЕ РОЛЯМИ (Только Владелец) ---
 @dp.message(Command("setdirector"))
@@ -186,6 +360,13 @@ async def demote_cmd(message: types.Message, command: CommandObject):
                 return
             await conn.execute("UPDATE users SET role = 'user' WHERE user_id = $1;", target_id)
             await message.reply(f"👤 Пользователь <code>{target_id}</code> разжалован до обычного пользователя.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("setowner"))
+async def set_owner_cmd(message: types.Message):
+    if message.from_user.id == OWNER_ID:
+        await message.reply("👑 Ваши права Владельца подтверждены.")
+    else:
+        await message.reply("⛔️ У вас нет прав Владельца.")
 
 # --- ЗАПРОС СМЕНЫ АДМИНА ПОЛЬЗОВАТЕЛЕМ ---
 @dp.message(Command("change_admin"))
