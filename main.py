@@ -181,72 +181,64 @@ async def help_cmd(message: types.Message):
     await message.reply(text, parse_mode=ParseMode.HTML)
 
 # --- СТАТИСТИКА АДМИНОВ ПО ВЗЯТЫМ ПЗ (/adminstats) ---
+import logging
+from datetime import datetime, timezone, timedelta
+from aiogram import types
+from aiogram.enums import ParseMode
+
+# Настройка логгера для отслеживания ошибок в консоли Railway
+logger = logging.getLogger(__name__)
+
 async def process_admin_stats(message: types.Message):
-    if not await is_admin(message.from_user.id):
-        await message.reply("❌ Эта команда доступна только администрации!")
-        return
+    try:
+        # 1. Проверка прав администратора
+        if not await is_admin(message.from_user.id):
+            await message.reply("❌ Эта команда доступна только администрации!")
+            return
 
-    if not db_pool:
-        await message.reply("⚠️ База данных недоступна!")
-        return
+        # 2. Проверка пула БД
+        if db_pool is None:
+            logger.error("Database pool is None!")
+            await message.reply("⚠️ Ошибка: База данных не подключена.")
+            return
 
-    now_utc = datetime.now(timezone.utc)
-    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = now_utc - timedelta(days=7)
-    month_start = now_utc - timedelta(days=30)
+        now_utc = datetime.now(timezone.utc)
+        today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = now_utc - timedelta(days=7)
+        month_start = now_utc - timedelta(days=30)
 
-    async with db_pool.acquire() as conn:
-        # Получаем данные за день, неделю, месяц и всё время
-        day_rows = await conn.fetch("""
-            SELECT admin_id, admin_username, COUNT(*) as count 
-            FROM admin_actions WHERE created_at >= $1 
-            GROUP BY admin_id, admin_username ORDER BY count DESC;
-        """, today_start)
+        # 3. Безопасное выполнение запросов
+        async with db_pool.acquire() as conn:
+            day_rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions WHERE created_at >= $1 GROUP BY admin_id, admin_username ORDER BY count DESC;", today_start)
+            week_rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions WHERE created_at >= $1 GROUP BY admin_id, admin_username ORDER BY count DESC;", week_start)
+            month_rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions WHERE created_at >= $1 GROUP BY admin_id, admin_username ORDER BY count DESC;", month_start)
+            total_rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions GROUP BY admin_id, admin_username ORDER BY count DESC;")
 
-        week_rows = await conn.fetch("""
-            SELECT admin_id, admin_username, COUNT(*) as count 
-            FROM admin_actions WHERE created_at >= $1 
-            GROUP BY admin_id, admin_username ORDER BY count DESC;
-        """, week_start)
+        def format_rows(rows):
+            if not rows:
+                return "<i>Пока нет данных</i>\n"
+            res = ""
+            for idx, r in enumerate(rows, 1):
+                # Проверяем наличие ключей, чтобы избежать KeyError
+                name = f"@{r['admin_username']}" if r.get('admin_username') and r['admin_username'] != 'отсутствует' else f"ID: {r['admin_id']}"
+                res += f"{idx}. {name} — <b>{r['count']}</b>\n"
+            return res
 
-        month_rows = await conn.fetch("""
-            SELECT admin_id, admin_username, COUNT(*) as count 
-            FROM admin_actions WHERE created_at >= $1 
-            GROUP BY admin_id, admin_username ORDER BY count DESC;
-        """, month_start)
+        text = (
+            "📊 <b>Статистика работы администрации (взятые ПЗ):</b>\n\n"
+            f"📅 <b>За сегодня:</b>\n{format_rows(day_rows)}\n"
+            f"📈 <b>За неделю (7 дней):</b>\n{format_rows(week_rows)}\n"
+            f"🗓 <b>За месяц (30 дней):</b>\n{format_rows(month_rows)}\n"
+            f"🏆 <b>За всё время:</b>\n{format_rows(total_rows)}"
+        )
+        
+        await message.reply(text, parse_mode=ParseMode.HTML)
+        logger.info(f"Статистика успешно отправлена пользователю {message.from_user.id}")
 
-        total_rows = await conn.fetch("""
-            SELECT admin_id, admin_username, COUNT(*) as count 
-            FROM admin_actions 
-            GROUP BY admin_id, admin_username ORDER BY count DESC;
-        """)
-
-    def format_rows(rows):
-        if not rows:
-            return "<i>Пока нет данных</i>\n"
-        res = ""
-        for idx, r in enumerate(rows, 1):
-            name = f"@{r['admin_username']}" if r['admin_username'] and r['admin_username'] != 'отсутствует' else f"ID: {r['admin_id']}"
-            res += f"{idx}. {name} — <b>{r['count']}</b>\n"
-        return res
-
-    text = (
-        "📊 <b>Статистика работы администрации (взятые ПЗ):</b>\n\n"
-        f"📅 <b>За сегодня:</b>\n{format_rows(day_rows)}\n"
-        f"week <b>За неделю (7 дней):</b>\n{format_rows(week_rows)}\n".replace("week ", "📈 ") +
-        f"🗓 <b>За месяц (30 дней):</b>\n{format_rows(month_rows)}\n"
-        f"🏆 <b>За всё время:</b>\n{format_rows(total_rows)}"
-    )
-    await message.reply(text, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("adminstats"))
-async def admin_stats_cmd(message: types.Message):
-    await process_admin_stats(message)
-
-@dp.message(F.text.lower().startswith(".астат"))
-async def admin_stats_dot(message: types.Message):
-    await process_admin_stats(message)
-
+    except Exception as e:
+        # Логируем ошибку, чтобы увидеть её в Railway
+        logger.exception("Ошибка при обработке команды adminstats")
+        await message.reply(f"❌ Произошла техническая ошибка при получении статистики.")
 # --- СИСТЕМА ОТПУСКОВ (/rest) ---
 @dp.message(Command("rest"))
 async def rest_cmd(message: types.Message, command: CommandObject):
