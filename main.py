@@ -13,6 +13,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 OWNER_ID = 8674242517
 
 # --- FILE_ID КАРТИНОК ДЛЯ КАЖДОЙ РОЛИ ---
+# Примечание: Если картинки не отправляются, скинь фото своему боту в ЛС,
+# скопируй присланный им file_id и вставь сюда!
 ROLE_IMAGES = {
     "owner": "AgACAgEAAyEFAAMBBfhjBAADAmp9dVI8vdVmrsan-2KbKw6VSnhNAALODGsbVX3xR6JqNvy31JNfAQADAgADeAADPQQ",
     "director": "AgACAgEAAyEFAAMBBfhjBAADA2p9dVITraxlKk80Pjsmo4BcFRRaAALPDGsbVX3xRz6rUFLATrZUAQADAgADeAADPQQ",
@@ -71,14 +73,15 @@ def extract_target_user_id(message: types.Message) -> int | None:
         return int(args[1])
     return None
 
-# --- ПОЛУЧЕНИЕ FILE_ID КАРТИНОК (Только для тебя) ---
+# --- ПОЛУЧЕНИЕ FILE_ID КАРТИНОК В ЛИЧКЕ БОТА (Только для Владельца) ---
 @dp.message(F.photo, F.from_user.id == OWNER_ID)
 async def get_photo_file_id(message: types.Message):
     photo_id = message.photo[-1].file_id
     await message.reply(
-        f"🖼 **`file_id` твоей картинки:**\n\n"
-        f"`{photo_id}`\n\n"
-        f"📌 *Нажми на код выше, чтобы скопировать его!*"
+        f"🖼 <b><code>file_id</code> твоей картинки:</b>\n\n"
+        f"<code>{photo_id}</code>\n\n"
+        f"📌 <i>Нажми на код выше, чтобы скопировать его!</i>",
+        parse_mode="HTML"
     )
 
 # --- КОМАНДА /START С КАРТИНКАМИ ---
@@ -97,15 +100,19 @@ async def start_cmd(message: types.Message):
     
     photo = ROLE_IMAGES.get(role, ROLE_IMAGES["user"])
     
+    # Экранирование спецсимволов HTML для безопасности Имени
+    full_name = message.from_user.full_name.replace("<", "&lt;").replace(">", "&gt;")
+    
     caption_text = (
-        f"👋 **Привет, {message.from_user.full_name}!**\n\n"
-        f"Твой статус в системе: **{role_names.get(role, '👤 Пользователь')}**"
+        f"👋 <b>Привет, {full_name}!</b>\n\n"
+        f"Твой статус в системе: <b>{role_names.get(role, '👤 Пользователь')}</b>"
     )
 
     try:
-        await message.answer_photo(photo=photo, caption=caption_text, parse_mode="Markdown")
-    except Exception:
-        await message.answer(caption_text, parse_mode="Markdown")
+        await message.answer_photo(photo=photo, caption=caption_text, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Ошибка при отправке фото: {e}")
+        await message.answer(caption_text, parse_mode="HTML")
 
 # --- УПРАВЛЕНИЕ РОЛЯМИ ---
 @dp.message(Command("set_director"))
@@ -116,11 +123,11 @@ async def set_director_cmd(message: types.Message):
 
     target_id = extract_target_user_id(message)
     if not target_id:
-        await message.reply("⚠️ Ответьте на сообщение или напишите: `/set_director 123456789`")
+        await message.reply("⚠️ Ответьте на сообщение или напишите: <code>/set_director 123456789</code>", parse_mode="HTML")
         return
 
     await set_user_role(target_id, None, "director")
-    await message.reply(f"✅ Пользователю `{target_id}` присвоена роль **Директор** 💼")
+    await message.reply(f"✅ Пользователю <code>{target_id}</code> присвоена роль <b>Директор</b> 💼", parse_mode="HTML")
 
 @dp.message(Command("set_admin"))
 async def set_admin_cmd(message: types.Message):
@@ -131,11 +138,11 @@ async def set_admin_cmd(message: types.Message):
 
     target_id = extract_target_user_id(message)
     if not target_id:
-        await message.reply("⚠️ Ответьте на сообщение или напишите: `/set_admin 123456789`")
+        await message.reply("⚠️ Ответьте на сообщение или напишите: <code>/set_admin 123456789</code>", parse_mode="HTML")
         return
 
     await set_user_role(target_id, None, "admin")
-    await message.reply(f"✅ Пользователю `{target_id}` присвоена роль **Администратор** 🛡")
+    await message.reply(f"✅ Пользователю <code>{target_id}</code> присвоена роль <b>Администратор</b> 🛡", parse_mode="HTML")
 
 @dp.message(Command("set_intern"))
 async def set_intern_cmd(message: types.Message):
@@ -146,11 +153,11 @@ async def set_intern_cmd(message: types.Message):
 
     target_id = extract_target_user_id(message)
     if not target_id:
-        await message.reply("⚠️ Ответьте на сообщение или напишите: `/set_intern 123456789`")
+        await message.reply("⚠️ Ответьте на сообщение или напишите: <code>/set_intern 123456789</code>", parse_mode="HTML")
         return
 
     await set_user_role(target_id, None, "intern")
-    await message.reply(f"✅ Пользователю `{target_id}` присвоена роль **Стажёр** 🔰")
+    await message.reply(f"✅ Пользователю <code>{target_id}</code> присвоена роль <b>Стажёр</b> 🔰", parse_mode="HTML")
 
 @dp.message(Command("demote"))
 async def demote_cmd(message: types.Message):
@@ -161,7 +168,7 @@ async def demote_cmd(message: types.Message):
 
     target_id = extract_target_user_id(message)
     if not target_id:
-        await message.reply("⚠️ Ответьте на сообщение или напишите: `/demote 123456789`")
+        await message.reply("⚠️ Ответьте на сообщение или напишите: <code>/demote 123456789</code>", parse_mode="HTML")
         return
 
     if target_id == OWNER_ID:
@@ -169,7 +176,7 @@ async def demote_cmd(message: types.Message):
         return
 
     await set_user_role(target_id, None, "user")
-    await message.reply(f"🗑 Роль с пользователя `{target_id}` снята.")
+    await message.reply(f"🗑 Роль с пользователя <code>{target_id}</code> снята.", parse_mode="HTML")
 
 # --- ЗАПУСК БОТА ---
 async def main():
