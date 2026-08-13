@@ -1,8 +1,8 @@
 import os
 import logging
 import asyncpg
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
 
 # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
@@ -11,10 +11,10 @@ logging.basicConfig(level=logging.INFO)
 # --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", 0)) if os.getenv("ADMIN_CHAT_ID") else None
 
-# ⚠️ УКАЖИ ЗДЕСЬ СВОЙ TELEGRAM ID (например: 1234567890)
-OWNER_ID = 8674242517  # Замени эти цифры на свой ID в Telegram!
+# 👑 ТВОЙ TELEGRAM ID
+OWNER_ID = 8674242517
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -33,21 +33,13 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as conn:
-            # Таблица пользователей
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
                     role TEXT DEFAULT 'user',
-                    is_banned BOOLEAN DEFAULT FALSE,
-                    topic_id INT
+                    is_banned BOOLEAN DEFAULT FALSE
                 );
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS topic_id INT;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
-            """)
-            
-            # Таблица сообщений
-            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
@@ -61,15 +53,12 @@ async def init_db():
         db_error_msg = str(e)
         logging.error(f"Ошибка подключения к БД: {e}")
 
-# --- ПОЛУЧЕНИЕ РОЛИ ПОЛЬЗОВАТЕЛЯ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 async def get_user_role(user_id: int) -> str:
-    # 1. Если это твой ID — ты ВСЕГДА владелец
     if user_id == OWNER_ID:
         return "owner"
-        
     if not db_pool:
         return "user"
-        
     try:
         async with db_pool.acquire() as conn:
             role = await conn.fetchval("SELECT role FROM users WHERE user_id = $1;", user_id)
@@ -77,30 +66,95 @@ async def get_user_role(user_id: int) -> str:
     except Exception:
         return "user"
 
+async def is_admin(user_id: int) -> bool:
+    role = await get_user_role(user_id)
+    return role in ["owner", "director", "admin", "intern"]
+
 # --- КОМАНДА /START ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     role = "owner" if message.from_user.id == OWNER_ID else "user"
-    
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO users (user_id, username, role) 
                 VALUES ($1, $2, $3)
-                ON CONFLICT (user_id) DO UPDATE SET 
-                    username = EXCLUDED.username,
-                    role = CASE WHEN users.user_id = $1 AND $3 = 'owner' THEN 'owner' ELSE users.role END;
+                ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username;
             """, message.from_user.id, message.from_user.username, role)
             
-    await message.reply("👋 Привет! Бот работает и готов к приёму сообщений.")
+    start_text = (
+        "приветствую путник ты попал в прекрасный бот под названием \"вечернее сияние\".\n"
+        "перед тем как начать общение, прошу заглянуть в наш тгк: https://t.me/eve_ning_glow\n"
+        "там вся важная информация.\n"
+        "Прочитал? тогда пиши \"привет общение/поддержка/уни\" и к тебе придет админ.\n"
+        "удачи тебе солнышко"
+    )
+    await message.reply(start_text, disable_web_page_preview=False)
 
-# --- КОМАНДА ДЛЯ ВЫДАЧИ ВЛАДЕЛЬЦА СЕБЕ В БазеДанных ---
+# --- КОМАНДА /HELP ---
+@dp.message(Command("help"))
+async def help_cmd(message: types.Message):
+    user_id = message.from_user.id
+    user_is_admin = await is_admin(user_id)
+    
+    text = "📌 <b>Список доступных команд:</b>\n\n"
+    text += "👤 <b>Пользователям:</b>\n"
+    text += "├ /start — Запустить бота\n"
+    text += "└ /help — Справка по командам\n\n"
+    
+    if user_is_admin:
+        text += "🛡 <b>Администрации:</b>\n"
+        text += "├ /stats — Статистика бота\n"
+        text += "├ /ban [ID] — Заблокировать пользователя\n"
+        text += "├ /unban [ID] — Разблокировать пользователя\n"
+        text += "├ /broadcast [текст] — Рассылка пользователям\n"
+        text += "├ /setdirector [ID] — Назначить директора\n"
+        text += "├ /setadmin [ID] — Назначить администратора\n"
+        text += "├ /setintern [ID] — Назначить стажёра\n"
+        text += "└ /demote [ID] — Снять роль до пользователя\n\n"
+        
+    if user_id == OWNER_ID:
+        text += "👑 <b>Владельцу:</b>\n"
+        text += "└ /setowner — Подтвердить права Владельца в БД\n"
+
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- УПРАВЛЕНИЕ РОЛЯМИ ---
+async def change_role(message: types.Message, command: CommandObject, new_role: str, role_name: str):
+    if not await is_admin(message.from_user.id):
+        await message.reply("❌ У вас нет прав на управление ролями!")
+        return
+    if not command.args or not command.args.isdigit():
+        await message.reply(f"⚠️ Укажите Telegram ID. Пример: <code>/{message.text.split()[0]} 12345678</code>", parse_mode=ParseMode.HTML)
+        return
+    
+    target_id = int(command.args)
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET role = $1 WHERE user_id = $2;", new_role, target_id)
+        await message.reply(f"✅ Пользователю <code>{target_id}</code> выдан статус: <b>{role_name}</b>", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("setdirector"))
+async def set_director_cmd(message: types.Message, command: CommandObject):
+    await change_role(message, command, "director", "💼 Директор")
+
+@dp.message(Command("setadmin"))
+async def set_admin_cmd(message: types.Message, command: CommandObject):
+    await change_role(message, command, "admin", "🛡 Администратор")
+
+@dp.message(Command("setintern"))
+async def set_intern_cmd(message: types.Message, command: CommandObject):
+    await change_role(message, command, "intern", "🔰 Стажёр")
+
+@dp.message(Command("demote"))
+async def demote_cmd(message: types.Message, command: CommandObject):
+    await change_role(message, command, "user", "👤 Обычный пользователь")
+
 @dp.message(Command("setowner"))
 async def set_owner_cmd(message: types.Message):
     if message.from_user.id != OWNER_ID:
         await message.reply("❌ Эта команда доступна только главному владельцу!")
         return
-
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute("""
@@ -108,67 +162,148 @@ async def set_owner_cmd(message: types.Message):
                 VALUES ($1, $2, 'owner')
                 ON CONFLICT (user_id) DO UPDATE SET role = 'owner';
             """, message.from_user.id, message.from_user.username)
-        await message.reply("👑 Ваша роль 'Владелец' успешно записана в базу данных!")
-    else:
-        await message.reply("⚠️ База данных недоступна.")
+        await message.reply("👑 Ваша роль 'Владелец' успешно записана в БД!")
 
-# --- КОМАНДА /STATS ---
+# --- РАССЫЛКА (/broadcast) ---
+@dp.message(Command("broadcast"))
+async def broadcast_cmd(message: types.Message, command: CommandObject):
+    if not await is_admin(message.from_user.id):
+        await message.reply("❌ У вас нет прав для рассылки!")
+        return
+    if not command.args:
+        await message.reply("⚠️ Напишите текст рассылки. Пример:\n<code>/broadcast Всем привет!</code>", parse_mode=ParseMode.HTML)
+        return
+
+    text_to_send = command.args
+    if not db_pool:
+        await message.reply("⚠️ База данных недоступна!")
+        return
+
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT user_id FROM users WHERE is_banned = FALSE;")
+    
+    count = 0
+    for u in users:
+        try:
+            await bot.send_message(u["user_id"], text_to_send)
+            count += 1
+        except Exception:
+            pass
+
+    await message.reply(f"📢 Рассылка завершена! Успешно доставлено: <b>{count}</b> пользователям.", parse_mode=ParseMode.HTML)
+
+# --- БАН / РАЗБАН ---
+@dp.message(Command("ban"))
+async def ban_cmd(message: types.Message, command: CommandObject):
+    if not await is_admin(message.from_user.id):
+        return
+    if not command.args or not command.args.isdigit():
+        await message.reply("⚠️ Укажите ID: <code>/ban 12345678</code>", parse_mode=ParseMode.HTML)
+        return
+    target_id = int(command.args)
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET is_banned = TRUE WHERE user_id = $1;", target_id)
+        await message.reply(f"🚫 Пользователь <code>{target_id}</code> забанен!", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("unban"))
+async def unban_cmd(message: types.Message, command: CommandObject):
+    if not await is_admin(message.from_user.id):
+        return
+    if not command.args or not command.args.isdigit():
+        await message.reply("⚠️ Укажите ID: <code>/unban 12345678</code>", parse_mode=ParseMode.HTML)
+        return
+    target_id = int(command.args)
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET is_banned = FALSE WHERE user_id = $1;", target_id)
+        await message.reply(f"🍏 Пользователь <code>{target_id}</code> разбанен!", parse_mode=ParseMode.HTML)
+
+# --- СТАТИСТИКА (/stats) ---
 @dp.message(Command("stats"))
 async def stats_cmd(message: types.Message):
-    user_role = await get_user_role(message.from_user.id)
-    if user_role not in ["owner", "director", "admin"]:
-        await message.reply("❌ Просматривать статистику могут только Администраторы, Директора и Владелец!")
+    if not await is_admin(message.from_user.id):
+        await message.reply("❌ Отказано в доступе!")
         return
-
     if not db_pool:
-        await message.reply(f"⚠️ <b>База данных недоступна!</b>\n<code>{db_error_msg}</code>", parse_mode=ParseMode.HTML)
+        await message.reply("⚠️ База данных недоступна!")
         return
 
-    try:
+    async with db_pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users;") or 0
+        banned_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE;") or 0
+        clean_users = total_users - banned_users
+
+        owners = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'owner';") or 1
+        directors = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'director';") or 0
+        admins = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';") or 0
+        interns = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';") or 0
+        simple_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'user';") or 0
+
+        user_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'user';") or 0
+        admin_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'admin';") or 0
+        total_msgs = user_msgs + admin_msgs
+
+    text = (
+        "📊 <b>Полная статистика бота:</b>\n\n"
+        "👥 <b>Пользователи:</b>\n"
+        f"├ Всего пользователей: <b>{total_users}</b>\n"
+        f"├ 🍏 Активных (чистых): <b>{clean_users}</b>\n"
+        f"└ 🚫 Забаненных: <b>{banned_users}</b>\n\n"
+        "🎭 <b>Разделение по ролям:</b>\n"
+        f"├ 👑 Владелец: <b>{owners}</b>\n"
+        f"├ 💼 Директоров: <b>{directors}</b>\n"
+        f"├ 🛡 Администраторов: <b>{admins}</b>\n"
+        f"├ 🔰 Стажёров: <b>{interns}</b>\n"
+        f"└ 👤 Пользователей: <b>{simple_users}</b>\n\n"
+        "✉️ <b>Сообщения и активность:</b>\n"
+        f"├ 📩 От пользователей: <b>{user_msgs}</b>\n"
+        f"├ 📤 От администраторов: <b>{admin_msgs}</b>\n"
+        f"└ 💬 Всего сообщений: <b>{total_msgs}</b>"
+    )
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- ПЕРЕСЫЛКА СООБЩЕНИЙ (Пользователь -> Админ Чат) ---
+@dp.message(F.chat.type == "private")
+async def forward_user_message(message: types.Message):
+    if not ADMIN_CHAT_ID:
+        return
+
+    if db_pool:
         async with db_pool.acquire() as conn:
-            # 1. Пользователи и баны
-            total_users = await conn.fetchval("SELECT COUNT(*) FROM users;") or 0
-            banned_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE;") or 0
-            clean_users = total_users - banned_users
+            is_banned = await conn.fetchval("SELECT is_banned FROM users WHERE user_id = $1;", message.from_user.id)
+            if is_banned:
+                await message.reply("🚫 Вы заблокированы и не можете отправлять сообщения.")
+                return
+            await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'user');", message.from_user.id)
 
-            # 2. Роли
-            owners = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'owner';") or 1
-            directors = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'director';") or 0
-            admins = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';") or 0
-            interns = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';") or 0
-            simple_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'user';") or 0
+    header = f"📩 <b>Новое сообщение</b>\nОт: {message.from_user.full_name} (@{message.from_user.username or 'нет'})\nID: <code>{message.from_user.id}</code>\n\n"
+    await bot.send_message(ADMIN_CHAT_ID, header + (message.text or "[Медиафайл]"), parse_mode=ParseMode.HTML)
 
-            # 3. Сообщения
-            user_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'user';") or 0
-            admin_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'admin';") or 0
-            total_msgs = user_msgs + admin_msgs
+# --- ОТВЕТ АДМИНА ПОЛЬЗОВАТЕЛЮ ---
+@dp.message(F.chat.id == ADMIN_CHAT_ID)
+async def reply_to_user(message: types.Message):
+    if not message.reply_to_message or not message.reply_to_message.text:
+        return
 
-        text = (
-            "📊 <b>Полная статистика бота:</b>\n\n"
-            "👥 <b>Пользователи:</b>\n"
-            f"├ Всего пользователей: <b>{total_users}</b>\n"
-            f"├ 🍏 Активных (чистых): <b>{clean_users}</b>\n"
-            f"└ 🚫 Забаненных: <b>{banned_users}</b>\n\n"
-            
-            "🎭 <b>Разделение по ролям:</b>\n"
-            f"├ 👑 Владелец: <b>{owners}</b>\n"
-            f"├ 💼 Директоров: <b>{directors}</b>\n"
-            f"├ 🛡 Администраторов: <b>{admins}</b>\n"
-            f"├ 🔰 Стажёров: <b>{interns}</b>\n"
-            f"└ 👤 Пользователей: <b>{simple_users}</b>\n\n"
-            
-            "✉️ <b>Сообщения и активность:</b>\n"
-            f"├ 📩 От пользователей: <b>{user_msgs}</b>\n"
-            f"├ 📤 От администраторов: <b>{admin_msgs}</b>\n"
-            f"└ 💬 Всего сообщений: <b>{total_msgs}</b>"
-        )
-        await message.reply(text, parse_mode=ParseMode.HTML)
+    lines = message.reply_to_message.text.split("\n")
+    user_id = None
+    for line in lines:
+        if line.startswith("ID:"):
+            user_id = int(line.replace("ID:", "").strip())
+            break
 
-    except Exception as e:
-        logging.error(f"Ошибка при запросе статистики: {e}")
-        await message.reply(f"⚠️ Ошибка запроса к БД:\n<code>{e}</code>", parse_mode=ParseMode.HTML)
+    if user_id:
+        try:
+            await bot.send_message(user_id, f"💬 <b>Ответ поддержки:</b>\n\n{message.text}", parse_mode=ParseMode.HTML)
+            await message.reply("✅ Ответ отправлен пользователю!")
+            if db_pool:
+                async with db_pool.acquire() as conn:
+                    await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'admin');", user_id)
+        except Exception as e:
+            await message.reply(f"❌ Не удалось отправить сообщение: {e}")
 
-# --- ЗАПУСК БОТА ---
+# --- ЗАПУСК ---
 async def main():
     await init_db()
     await dp.start_polling(bot)
