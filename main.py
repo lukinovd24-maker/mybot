@@ -1,192 +1,86 @@
-import asyncio
-import logging
 import os
+import logging
 import asyncpg
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command, CommandStart
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.enums import ParseMode
 
-# --- НАСТРОЙКИ И ПЕРЕМЕННЫЕ ---
+# --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
+logging.basicConfig(level=logging.INFO)
+
+# --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-# Исправление формата URL для asyncpg (если Railway выдал postgres://)
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-# Твой Telegram ID — Главный Владелец
-OWNER_ID = 8674242517
-
-# ID твоего чата администраторов
-ADMIN_CHAT_ID = -1004404098187
-
-# --- FILE_ID КАРТИНОК ДЛЯ КАЖДОЙ РОЛИ ---
-ROLE_IMAGES = {
-    "owner": "AgACAgEAAyEFAAMBBfhjBAADAmp9dVI8vdVmrsan-2KbKw6VSnhNAALODGsbVX3xR6JqNvy31JNfAQADAgADeAADPQQ",
-    "director": "AgACAgEAAyEFAAMBBfhjBAADA2p9dVITraxlKk80Pjsmo4BcFRRaAALPDGsbVX3xRz6rUFLATrZUAQADAgADeAADPQQ",
-    "admin": "AgACAgEAAyEFAAMBBfhjBAADBGp9dVLL-nSsXqZHigTHjc_WaYy-AALQDGsbVX3xR-swwTZ6AAGZoAEAAwIAA3gAAz0E",
-    "intern": "AgACAgEAAyEFAAMBBfhjBAADBWp9dVKOSnt5hdtpqHBmepXxOi-mAALRDGsbVX3xRzjICoP46KtYAQADAgADeAADPQQ",
-    "user": "AgACAgEAAyEFAAMBBfhjBAADBWp9dVKOSnt5hdtpqHBmepXxOi-mAALRDGsbVX3xRzjICoP46KtYAQADAgADeAADPQQ"
-}
-
-if not BOT_TOKEN:
-    raise ValueError("Ошибка: Переменная BOT_TOKEN не задана!")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
 db_pool = None
 db_error_msg = ""
 
-# Кэш топиков в памяти
-user_topics_cache = {}
-
-# --- РАБОТА С БАЗОЙ ДАННЫХ ---
+# --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
 async def init_db():
     global db_pool, db_error_msg
     if not DATABASE_URL:
-        db_error_msg = "Переменная DATABASE_URL не задана в Railway Variables!"
+        db_error_msg = "Переменная DATABASE_URL не задана в Railway!"
         logging.error(db_error_msg)
         return
 
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as conn:
+            # Таблица пользователей
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
                     role TEXT DEFAULT 'user',
+                    is_banned BOOLEAN DEFAULT FALSE,
                     topic_id INT
+                );
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS topic_id INT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
+            """)
+            
+            # Таблица сообщений (для подсчета активности)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    sender_type TEXT, -- 'user' или 'admin'
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
         logging.info("База данных PostgreSQL успешно инициализирована.")
+        db_error_msg = ""
     except Exception as e:
         db_error_msg = str(e)
         logging.error(f"Ошибка подключения к БД: {e}")
 
-async def set_user_role(user_id: int, username: str | None, role: str):
-    if db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO users (user_id, username, role)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (user_id) 
-                    DO UPDATE SET role = EXCLUDED.role, username = COALESCE(EXCLUDED.username, users.username);
-                """, user_id, username, role)
-        except Exception as e:
-            logging.error(f"Ошибка при сохранении пользователя: {e}")
-
+# --- ПОЛУЧЕНИЕ РОЛИ ПОЛЬЗОВАТЕЛЯ ---
 async def get_user_role(user_id: int) -> str:
-    if user_id == OWNER_ID:
-        return "owner"
-    if db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT role FROM users WHERE user_id = $1;", user_id)
-                if row and row['role']:
-                    return row['role']
-        except Exception as e:
-            logging.error(f"Ошибка получения роли: {e}")
-    return "user"
-
-# Сохранение и получение ID топика
-async def get_user_topic(user_id: int) -> int | None:
-    if user_id in user_topics_cache:
-        return user_topics_cache[user_id]
-    if db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
-                if topic_id:
-                    user_topics_cache[user_id] = topic_id
-                    return topic_id
-        except Exception as e:
-            logging.error(f"Ошибка получения topic_id: {e}")
-    return None
-
-async def save_user_topic(user_id: int, topic_id: int):
-    user_topics_cache[user_id] = topic_id
-    if db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO users (user_id, topic_id)
-                    VALUES ($1, $2)
-                    ON CONFLICT (user_id) 
-                    DO UPDATE SET topic_id = EXCLUDED.topic_id;
-                """, user_id, topic_id)
-        except Exception as e:
-            logging.error(f"Ошибка сохранения topic_id: {e}")
-
-# Поиск пользователя по topic_id
-async def get_user_by_topic(topic_id: int) -> int | None:
-    for uid, tid in user_topics_cache.items():
-        if tid == topic_id:
-            return uid
-    if db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", topic_id)
-                if user_id:
-                    user_topics_cache[user_id] = topic_id
-                    return user_id
-        except Exception as e:
-            logging.error(f"Ошибка поиска пользователя по топику: {e}")
-    return None
-
-def extract_target_user_id(message: types.Message) -> int | None:
-    if message.reply_to_message:
-        return message.reply_to_message.from_user.id
-    args = message.text.split()
-    if len(args) > 1 and args[1].isdigit():
-        return int(args[1])
-    return None
-
-async def notify_user(user_id: int, text: str):
+    if not db_pool:
+        return "user"
     try:
-        await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
-    except Exception as e:
-        logging.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
-
-# --- ПОЛУЧЕНИЕ FILE_ID КАРТИНОК (Только для Владельца) ---
-@dp.message(F.photo, F.from_user.id == OWNER_ID, F.chat.type == "private")
-async def get_photo_file_id(message: types.Message):
-    photo_id = message.photo[-1].file_id
-    await message.reply(
-        f"🖼 <b><code>file_id</code> твоей картинки:</b>\n\n"
-        f"<code>{photo_id}</code>\n\n"
-        f"📌 <i>Нажми на код выше, чтобы скопировать его!</i>",
-        parse_mode="HTML"
-    )
+        async with db_pool.acquire() as conn:
+            role = await conn.fetchval("SELECT role FROM users WHERE user_id = $1;", user_id)
+            return role or "user"
+    except Exception:
+        return "user"
 
 # --- КОМАНДА /START ---
-@dp.message(CommandStart(), F.chat.type == "private")
+@dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    role = await get_user_role(message.from_user.id)
-    await set_user_role(message.from_user.id, message.from_user.username, role)
-    
-    role_names = {
-        "owner": "👑 Владелец",
-        "director": "💼 Директор",
-        "admin": "🛡 Администратор",
-        "intern": "🔰 Стажёр",
-        "user": "👤 Пользователь"
-    }
-    
-    photo = ROLE_IMAGES.get(role, ROLE_IMAGES["user"])
-    full_name = message.from_user.full_name.replace("<", "&lt;").replace(">", "&gt;")
-    
-    caption_text = (
-        f"👋 <b>Привет, {full_name}!</b>\n\n"
-        f"Твой статус в системе: <b>{role_names.get(role, '👤 Пользователь')}</b>\n\n"
-        f"💬 <i>Если у вас есть вопрос — просто напишите его в этот чат, и наши администраторы вам ответят!</i>"
-    )
-
-    try:
-        await message.answer_photo(photo=photo, caption=caption_text, parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"Ошибка при отправке фото: {e}")
-        await message.answer(caption_text, parse_mode="HTML")
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO users (user_id, username) 
+                VALUES ($1, $2)
+                ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username;
+            """, message.from_user.id, message.from_user.username)
+            
+    await message.reply("👋 Привет! Бот работает и готов к приёму сообщений.")
 
 # --- КОМАНДА /STATS ---
 @dp.message(Command("stats"))
@@ -197,168 +91,57 @@ async def stats_cmd(message: types.Message):
         return
 
     if not db_pool:
-        await message.reply(f"⚠️ База данных недоступна.\nПричина: <code>{db_error_msg}</code>", parse_mode="HTML")
+        await message.reply(f"⚠️ <b>База данных недоступна!</b>\n<code>{db_error_msg}</code>", parse_mode=ParseMode.HTML)
         return
 
     try:
         async with db_pool.acquire() as conn:
-            total_users = await conn.fetchval("SELECT COUNT(*) FROM users;")
-            directors = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'director';")
-            admins = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';")
-            interns = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';")
-            users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'user';")
+            # 1. Пользователи и баны
+            total_users = await conn.fetchval("SELECT COUNT(*) FROM users;") or 0
+            banned_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE;") or 0
+            clean_users = total_users - banned_users
+
+            # 2. Роли
+            directors = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'director';") or 0
+            admins = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';") or 0
+            interns = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';") or 0
+            simple_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'user';") or 0
+
+            # 3. Сообщения
+            user_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'user';") or 0
+            admin_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'admin';") or 0
+            total_msgs = user_msgs + admin_msgs
 
         text = (
-            "📊 <b>Статистика пользователей бота:</b>\n\n"
-            f"👥 Всего пользователей в БД: <b>{total_users}</b>\n\n"
-            f"👑 Владелец: <b>1</b>\n"
-            f"💼 Директоров: <b>{directors}</b>\n"
-            f"🛡 Администраторов: <b>{admins}</b>\n"
-            f"🔰 Стажёров: <b>{interns}</b>\n"
-            f"👤 Обычных пользователей: <b>{users}</b>"
+            "📊 <b>Полная статистика бота:</b>\n\n"
+            "👥 <b>Пользователи:</b>\n"
+            f"├ Всего пользователей: <b>{total_users}</b>\n"
+            f"├ 🍏 Активных (чистых): <b>{clean_users}</b>\n"
+            f"└ 🚫 Забаненных: <b>{banned_users}</b>\n\n"
+            
+            "🎭 <b>Разделение по ролям:</b>\n"
+            f"├ 👑 Владелец: <b>1</b>\n"
+            f"├ 💼 Директоров: <b>{directors}</b>\n"
+            f"├ 🛡 Администраторов: <b>{admins}</b>\n"
+            f"├ 🔰 Стажёров: <b>{interns}</b>\n"
+            f"└ 👤 Пользователей: <b>{simple_users}</b>\n\n"
+            
+            "✉️ <b>Сообщения и активность:</b>\n"
+            f"├ 📩 От пользователей: <b>{user_msgs}</b>\n"
+            f"├ 📤 От администраторов: <b>{admin_msgs}</b>\n"
+            f"└ 💬 Всего сообщений: <b>{total_msgs}</b>"
         )
-        await message.reply(text, parse_mode="HTML")
+        await message.reply(text, parse_mode=ParseMode.HTML)
+
     except Exception as e:
-        await message.reply(f"⚠️ Ошибка выполнения запроса к БД: <code>{e}</code>", parse_mode="HTML")
-
-# --- УПРАВЛЕНИЕ РОЛЯМИ ---
-@dp.message(Command("set_director"))
-async def set_director_cmd(message: types.Message):
-    if message.from_user.id != OWNER_ID:
-        await message.reply("❌ Назначать Директоров может только Владелец бота!")
-        return
-    target_id = extract_target_user_id(message)
-    if not target_id:
-        await message.reply("⚠️ Ответьте на сообщение или напишите: <code>/set_director 123456789</code>", parse_mode="HTML")
-        return
-    await set_user_role(target_id, None, "director")
-    await message.reply(f"✅ Пользователю <code>{target_id}</code> присвоена роль <b>Директор</b> 💼", parse_mode="HTML")
-    await notify_user(target_id, "🎉 <b>Поздравляем!</b> Вам присвоена должность <b>Директора</b> 💼")
-
-@dp.message(Command("set_admin"))
-async def set_admin_cmd(message: types.Message):
-    user_role = await get_user_role(message.from_user.id)
-    if user_role not in ["owner", "director"]:
-        await message.reply("❌ Назначать Администраторов могут только Директора и Владелец!")
-        return
-    target_id = extract_target_user_id(message)
-    if not target_id:
-        await message.reply("⚠️ Ответьте на сообщение или напишите: <code>/set_admin 123456789</code>", parse_mode="HTML")
-        return
-    await set_user_role(target_id, None, "admin")
-    await message.reply(f"✅ Пользователю <code>{target_id}</code> присвоена роль <b>Администратор</b> 🛡", parse_mode="HTML")
-    await notify_user(target_id, "🎉 <b>Поздравляем!</b> Вам присвоена должность <b>Администратора</b> 🛡")
-
-@dp.message(Command("set_intern"))
-async def set_intern_cmd(message: types.Message):
-    user_role = await get_user_role(message.from_user.id)
-    if user_role not in ["owner", "director"]:
-        await message.reply("❌ Назначать Стажёров могут только Директора и Владелец!")
-        return
-    target_id = extract_target_user_id(message)
-    if not target_id:
-        await message.reply("⚠️ Ответьте на сообщение или напишите: <code>/set_intern 123456789</code>", parse_mode="HTML")
-        return
-    await set_user_role(target_id, None, "intern")
-    await message.reply(f"✅ Пользователю <code>{target_id}</code> присвоена роль <b>Стажёр</b> 🔰", parse_mode="HTML")
-    await notify_user(target_id, "🎉 <b>Поздравляем!</b> Вам присвоена должность <b>Стажёра</b> 🔰")
-
-@dp.message(Command("demote"))
-async def demote_cmd(message: types.Message):
-    user_role = await get_user_role(message.from_user.id)
-    if user_role not in ["owner", "director"]:
-        await message.reply("❌ Снимать роли могут только Директора и Владелец!")
-        return
-    target_id = extract_target_user_id(message)
-    if not target_id:
-        await message.reply("⚠️ Ответьте на сообщение или напишите: <code>/demote 123456789</code>", parse_mode="HTML")
-        return
-    if target_id == OWNER_ID:
-        await message.reply("❌ Нельзя снять роль с Владельца бота!")
-        return
-    await set_user_role(target_id, None, "user")
-    await message.reply(f"🗑 Роль с пользователя <code>{target_id}</code> снята.", parse_mode="HTML")
-    await notify_user(target_id, "⚠️ <b>Уведомление:</b> Вы были сняты со своей должности в системе.")
-
-# --- 1. ПЕРЕСЫЛКА ОТ ПОЛЬЗОВАТЕЛЯ В ТОПИК ---
-@dp.message(F.chat.type == "private", ~F.text.startswith("/"))
-async def handle_user_messages(message: types.Message):
-    user_id = message.from_user.id
-    user_role = await get_user_role(user_id)
-    await set_user_role(user_id, message.from_user.username, user_role)
-    
-    try:
-        topic_id = await get_user_topic(user_id)
-
-        if not topic_id:
-            username_str = f"@{message.from_user.username}" if message.from_user.username else f"ID: {user_id}"
-            topic_name = f"{message.from_user.full_name} | {username_str}"
-            if len(topic_name) > 128:
-                topic_name = topic_name[:125] + "..."
-
-            created_topic = await bot.create_forum_topic(
-                chat_id=ADMIN_CHAT_ID,
-                name=topic_name
-            )
-            topic_id = created_topic.message_thread_id
-            await save_user_topic(user_id, topic_id)
-
-            header = (
-                f"👤 <b>Новая карточка диалога!</b>\n"
-                f"├ Имя: <b>{message.from_user.full_name}</b>\n"
-                f"├ Юзернейм: @{message.from_user.username or 'нет'}\n"
-                f"└ ID: <code>{user_id}</code>"
-            )
-            await bot.send_message(
-                chat_id=ADMIN_CHAT_ID, 
-                text=header, 
-                parse_mode="HTML", 
-                message_thread_id=topic_id
-            )
-
-        await bot.copy_message(
-            chat_id=ADMIN_CHAT_ID,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
-            message_thread_id=topic_id
-        )
-
-        await message.reply("✅ Ваше сообщение отправлено администрации! Вам ответят в ближайшее время.")
-        
-    except Exception as e:
-        logging.error(f"Ошибка при пересылке в топик: {e}")
-        await message.reply(f"⚠️ Не удалось переслать сообщение администрации: {e}")
-
-# --- 2. ПЕРЕСЫЛКА ОТ ОТВЕТА АДМИНА В ЛС ПОЛЬЗОВАТЕЛЮ ---
-@dp.message(F.chat.id == ADMIN_CHAT_ID, F.message_thread_id, ~F.text.startswith("/"))
-async def handle_admin_reply(message: types.Message):
-    # Игнорируем служебные системные сообщения (создание топика и т.д.)
-    if message.forum_topic_created or message.is_automatic_forward:
-        return
-
-    topic_id = message.message_thread_id
-    user_id = await get_user_by_topic(topic_id)
-
-    if not user_id:
-        return
-
-    try:
-        # Копируем сообщение администратора пользователю в ЛС
-        await bot.copy_message(
-            chat_id=user_id,
-            from_chat_id=ADMIN_CHAT_ID,
-            message_id=message.message_id
-        )
-    except Exception as e:
-        logging.error(f"Ошибка отправки ответа пользователю {user_id}: {e}")
-        await message.reply(f"⚠️ Ошибка доставки ответа пользователю: {e}")
+        logging.error(f"Ошибка при запросе статистики: {e}")
+        await message.reply(f"⚠️ Ошибка запроса к БД:\n<code>{e}</code>", parse_mode=ParseMode.HTML)
 
 # --- ЗАПУСК БОТА ---
 async def main():
-    logging.basicConfig(level=logging.INFO)
     await init_db()
-    print("Бот успешно запущен!")
-    await dp.start_polling(bot, allowed_updates=["message"])
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    import asyncio
     asyncio.run(main())
