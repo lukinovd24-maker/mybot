@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 
 # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -28,7 +29,7 @@ async def init_db():
     global db_pool, db_error_msg
     if not DATABASE_URL:
         db_error_msg = "Переменная DATABASE_URL не задана в Railway!"
-        logging.error(db_error_msg)
+        logger.error(db_error_msg)
         return
 
     try:
@@ -62,11 +63,11 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-        logging.info("База данных PostgreSQL успешно инициализирована.")
+        logger.info("База данных PostgreSQL успешно инициализирована.")
         db_error_msg = ""
     except Exception as e:
         db_error_msg = str(e)
-        logging.error(f"Ошибка подключения к БД: {e}")
+        logger.error(f"Ошибка подключения к БД: {e}")
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ПРОВЕРКА ОТПУСКА ---
 async def get_user_role(user_id: int) -> str:
@@ -89,7 +90,7 @@ async def get_user_role(user_id: int) -> str:
 
             return row["role"] or "user"
     except Exception as e:
-        logging.error(f"❌ Ошибка при получении роли для {user_id}: {e}")
+        logger.error(f"❌ Ошибка при получении роли для {user_id}: {e}")
         return "user"
 
 async def is_admin(user_id: int) -> bool:
@@ -181,25 +182,15 @@ async def help_cmd(message: types.Message):
     await message.reply(text, parse_mode=ParseMode.HTML)
 
 # --- СТАТИСТИКА АДМИНОВ ПО ВЗЯТЫМ ПЗ (/adminstats) ---
-import logging
-from datetime import datetime, timezone, timedelta
-from aiogram import types
-from aiogram.enums import ParseMode
-
-# Настройка логгера для отслеживания ошибок в консоли Railway
-logger = logging.getLogger(__name__)
-
 async def process_admin_stats(message: types.Message):
     try:
-        # 1. Проверка прав администратора
         if not await is_admin(message.from_user.id):
             await message.reply("❌ Эта команда доступна только администрации!")
             return
 
-        # 2. Проверка пула БД
-        if db_pool is None:
+        if not db_pool:
             logger.error("Database pool is None!")
-            await message.reply("⚠️ Ошибка: База данных не подключена.")
+            await message.reply("⚠️ База данных недоступна!")
             return
 
         now_utc = datetime.now(timezone.utc)
@@ -207,20 +198,38 @@ async def process_admin_stats(message: types.Message):
         week_start = now_utc - timedelta(days=7)
         month_start = now_utc - timedelta(days=30)
 
-        # 3. Безопасное выполнение запросов
         async with db_pool.acquire() as conn:
-            day_rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions WHERE created_at >= $1 GROUP BY admin_id, admin_username ORDER BY count DESC;", today_start)
-            week_rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions WHERE created_at >= $1 GROUP BY admin_id, admin_username ORDER BY count DESC;", week_start)
-            month_rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions WHERE created_at >= $1 GROUP BY admin_id, admin_username ORDER BY count DESC;", month_start)
-            total_rows = await conn.fetch("SELECT admin_id, admin_username, COUNT(*) as count FROM admin_actions GROUP BY admin_id, admin_username ORDER BY count DESC;")
+            day_rows = await conn.fetch("""
+                SELECT admin_id, admin_username, COUNT(*) as count 
+                FROM admin_actions WHERE created_at >= $1 
+                GROUP BY admin_id, admin_username ORDER BY count DESC;
+            """, today_start)
+
+            week_rows = await conn.fetch("""
+                SELECT admin_id, admin_username, COUNT(*) as count 
+                FROM admin_actions WHERE created_at >= $1 
+                GROUP BY admin_id, admin_username ORDER BY count DESC;
+            """, week_start)
+
+            month_rows = await conn.fetch("""
+                SELECT admin_id, admin_username, COUNT(*) as count 
+                FROM admin_actions WHERE created_at >= $1 
+                GROUP BY admin_id, admin_username ORDER BY count DESC;
+            """, month_start)
+
+            total_rows = await conn.fetch("""
+                SELECT admin_id, admin_username, COUNT(*) as count 
+                FROM admin_actions 
+                GROUP BY admin_id, admin_username ORDER BY count DESC;
+            """)
 
         def format_rows(rows):
             if not rows:
                 return "<i>Пока нет данных</i>\n"
             res = ""
             for idx, r in enumerate(rows, 1):
-                # Проверяем наличие ключей, чтобы избежать KeyError
-                name = f"@{r['admin_username']}" if r.get('admin_username') and r['admin_username'] != 'отсутствует' else f"ID: {r['admin_id']}"
+                username_val = r.get('admin_username') if hasattr(r, 'get') else r['admin_username']
+                name = f"@{username_val}" if username_val and username_val != 'отсутствует' else f"ID: {r['admin_id']}"
                 res += f"{idx}. {name} — <b>{r['count']}</b>\n"
             return res
 
@@ -231,14 +240,19 @@ async def process_admin_stats(message: types.Message):
             f"🗓 <b>За месяц (30 дней):</b>\n{format_rows(month_rows)}\n"
             f"🏆 <b>За всё время:</b>\n{format_rows(total_rows)}"
         )
-        
         await message.reply(text, parse_mode=ParseMode.HTML)
-        logger.info(f"Статистика успешно отправлена пользователю {message.from_user.id}")
-
     except Exception as e:
-        # Логируем ошибку, чтобы увидеть её в Railway
-        logger.exception("Ошибка при обработке команды adminstats")
-        await message.reply(f"❌ Произошла техническая ошибка при получении статистики.")
+        logger.exception("❌ Ошибка в process_admin_stats")
+        await message.reply(f"❌ Произошла ошибка при выполнении команды.")
+
+@dp.message(Command("adminstats"))
+async def admin_stats_cmd(message: types.Message):
+    await process_admin_stats(message)
+
+@dp.message(F.text.lower().startswith(".астат"))
+async def admin_stats_dot(message: types.Message):
+    await process_admin_stats(message)
+
 # --- СИСТЕМА ОТПУСКОВ (/rest) ---
 @dp.message(Command("rest"))
 async def rest_cmd(message: types.Message, command: CommandObject):
@@ -436,10 +450,8 @@ async def change_role(message: types.Message, command: CommandObject, new_role: 
             target_row = await conn.fetchrow("SELECT username FROM users WHERE user_id = $1;", target_id)
             target_name = f"@{target_row['username']}" if target_row and target_row["username"] else f"ID: {target_id}"
 
-        # 1. Отчет в чат
         await message.reply(f"✅ Пользователь <b>{target_name}</b> (<code>{target_id}</code>) назначен на должность: <b>{role_name}</b>", parse_mode=ParseMode.HTML)
 
-        # 2. Уведомление в ЛС пользователю
         try:
             await bot.send_message(
                 target_id, 
@@ -447,7 +459,7 @@ async def change_role(message: types.Message, command: CommandObject, new_role: 
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
-            logging.error(f"Не удалось отправить уведомление в ЛС пользователю {target_id}: {e}")
+            logger.error(f"Не удалось отправить уведомление в ЛС пользователю {target_id}: {e}")
 
 @dp.message(Command("setdirector"))
 async def set_director_cmd(message: types.Message, command: CommandObject):
@@ -582,7 +594,7 @@ async def stats_cmd(message: types.Message):
 @dp.message(F.chat.type == "private")
 async def forward_user_message(message: types.Message):
     if not ADMIN_CHAT_ID:
-        logging.error("❌ ОШИБКА: ADMIN_CHAT_ID не задан в переменных окружения!")
+        logger.error("❌ ОШИБКА: ADMIN_CHAT_ID не задан в переменных окружения!")
         return
 
     if message.text and message.text.startswith("/"):
@@ -609,11 +621,11 @@ async def forward_user_message(message: types.Message):
                 is_new_topic = True
                 try:
                     topic_title = f"{full_name} (@{username})"[:128]
-                    logging.info(f"🔄 Создаем новый топик для {user_id} в чате {ADMIN_CHAT_ID}...")
+                    logger.info(f"🔄 Создаем новый топик для {user_id} в чате {ADMIN_CHAT_ID}...")
                     
                     new_topic = await bot.create_forum_topic(chat_id=ADMIN_CHAT_ID, name=topic_title)
                     topic_id = new_topic.message_thread_id
-                    logging.info(f"✅ Топик успешно создан! ID топика: {topic_id}")
+                    logger.info(f"✅ Топик успешно создан! ID топика: {topic_id}")
 
                     await conn.execute("""
                         INSERT INTO users (user_id, username, topic_id) 
@@ -621,7 +633,7 @@ async def forward_user_message(message: types.Message):
                         ON CONFLICT (user_id) DO UPDATE SET topic_id = $3, username = $2;
                     """, user_id, username, topic_id)
                 except Exception as e:
-                    logging.error(f"❌ ОШИБКА СОЗДАНИЯ ТОПИКА: {e}")
+                    logger.error(f"❌ ОШИБКА СОЗДАНИЯ ТОПИКА: {e}")
                     topic_id = None
 
             await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'user');", user_id)
@@ -654,7 +666,7 @@ async def forward_user_message(message: types.Message):
                 )
                 await bot.pin_chat_message(chat_id=ADMIN_CHAT_ID, message_id=sent_msg.message_id)
             except Exception as e:
-                logging.error(f"❌ Ошибка отправки/закрепа инфо-сообщения: {e}")
+                logger.error(f"❌ Ошибка отправки/закрепа инфо-сообщения: {e}")
 
         try:
             await bot.copy_message(
@@ -663,11 +675,11 @@ async def forward_user_message(message: types.Message):
                 from_chat_id=message.chat.id, 
                 message_id=message.message_id
             )
-            logging.info(f"📨 Сообщение от {user_id} доставлено в топик {topic_id}")
+            logger.info(f"📨 Сообщение от {user_id} доставлено в топик {topic_id}")
         except Exception as e:
-            logging.error(f"❌ ОШИБКА ОТПРАВКИ СООБЩЕНИЯ В ТОПИК {topic_id}: {e}")
+            logger.error(f"❌ ОШИБКА ОТПРАВКИ СООБЩЕНИЯ В ТОПИК {topic_id}: {e}")
     else:
-        logging.error(f"⚠️ Сообщение не отправлено: topic_id равен None.")
+        logger.error(f"⚠️ Сообщение не отправлено: topic_id равен None.")
 
 # --- ОБРАБОТКА КНОПКИ "ВЗЯТЬ ПОЛЬЗОВАТЕЛЯ" ---
 @dp.callback_query(F.data.startswith("take_user_"))
@@ -678,7 +690,6 @@ async def take_user_callback(callback: types.CallbackQuery):
     admin_name = f"@{admin_username}" if admin_username != "отсутствует" else admin_user.full_name
     admin_info = f"{admin_name} (ID: <code>{admin_user.id}</code>)"
 
-    # Сохраняем действие в базу для статистики админов
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -704,7 +715,7 @@ async def take_user_callback(callback: types.CallbackQuery):
         )
         await callback.answer("Вы успешно взяли пользователя!", show_alert=False)
     except Exception as e:
-        logging.error(f"❌ Ошибка при обновлении сообщения о взятии ПЗ: {e}")
+        logger.error(f"❌ Ошибка при обновлении сообщения о взятии ПЗ: {e}")
         await callback.answer("Произошла ошибка при попытке взять пользователя.", show_alert=True)
 
 # --- ОТВЕТ АДМИНА ИЗ ТОПИКА ПОЛЬЗОВАТЕЛЮ ---
