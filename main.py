@@ -1,195 +1,168 @@
-
 import asyncio
 import logging
 import os
-from aiogram import Bot, Dispatcher, F
+import asyncpg
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
-from aiohttp import web
-import database as db
 
-TOKEN = os.getenv("BOT_TOKEN", "8641353697:AAGaWup_XK0YobyxpDTydxhEx5vsm_hBevc")
-GROUP_CHAT_ID = -1004404098187
+# --- НАСТРОЙКИ И ПЕРЕМЕННЫЕ ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Твой Telegram ID — Главный Владелец
 OWNER_ID = 8674242517
-PROJECT_NAME = "Вечернее сияние"
 
+if not BOT_TOKEN:
+    raise ValueError("Ошибка: Переменная BOT_TOKEN не задана!")
+
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-bot = Bot(token=TOKEN)
+db_pool = None
 
-@dp.message(CommandStart(), F.chat.type == "private")
-async def start_cmd(message: Message):
-    db.add_user(message.from_user.id)
+# --- РАБОТА С БАЗОЙ ДАННЫХ ---
+async def init_db():
+    global db_pool
+    if DATABASE_URL:
+        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        async with db_pool.acquire() as conn:
+            # Создаем таблицу пользователей с полем роли, если её ещё нет
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    role TEXT DEFAULT 'user'
+                );
+            """)
+        logging.info("База данных PostgreSQL успешно инициализирована.")
+
+async def set_user_role(user_id: int, username: str | None, role: str):
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO users (user_id, username, role)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) 
+                DO UPDATE SET role = EXCLUDED.role, username = COALESCE(EXCLUDED.username, users.username);
+            """, user_id, username, role)
+
+async def get_user_role(user_id: int) -> str:
+    if user_id == OWNER_ID:
+        return "owner"
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT role FROM users WHERE user_id = $1;", user_id)
+            if row and row['role']:
+                return row['role']
+    return "user"
+
+# Вспомогательная функция для получения target_id из текста или Reply
+def extract_target_user_id(message: types.Message) -> int | None:
+    if message.reply_to_message:
+        return message.reply_to_message.from_user.id
+    
+    args = message.text.split()
+    if len(args) > 1 and args[1].isdigit():
+        return int(args[1])
+    
+    return None
+
+# --- КОМАНДЫ ДЛЯ ВСЕХ ---
+@dp.message(CommandStart())
+async def start_cmd(message: types.Message):
+    role = await get_user_role(message.from_user.id)
+    # Автоматически сохраняем пользователя в базу при старте
+    await set_user_role(message.from_user.id, message.from_user.username, role)
+    
+    role_names = {
+        "owner": "👑 Владелец",
+        "director": "💼 Директор",
+        "admin": "🛡 Администратор",
+        "intern": "🔰 Стажёр",
+        "user": "👤 Пользователь"
+    }
+    
     await message.answer(
-        f"Привет! Добро пожаловать в проект «{PROJECT_NAME}» ✨\n\n"
-        "Напишите сюда ваше сообщение, и администрация ответит вам в ближайшее время."
+        f"👋 **Привет, {message.from_user.full_name}!**\n\n"
+        f"Твой статус в системе: **{role_names.get(role, '👤 Пользователь')}**"
     )
 
-@dp.message(Command("stats"))
-async def stats_cmd(message: Message):
-    if not db.is_admin(message.from_user.id, OWNER_ID):
-        return
-    
-    total_users, blocked_users = db.get_user_counts()
-    stats_data = db.get_stats()
-    
-    user_msgs = stats_data.get("user_messages", 0)
-    admin_replies = stats_data.get("admin_replies", 0)
-    total_messages = user_msgs + admin_replies
-    
-    text = (
-        f"📊 **Статистика бота**\n"
-        f"👥 Общее кол-во пользователей: **{total_users}**\n"
-        f"🚫 Заблокированных: **{blocked_users}**\n\n"
-        f"💬 Общее количество сообщений (от админов + от пользователей): **{total_messages}**\n"
-        f"📥 Написано сообщений пользователями: **{user_msgs}**\n"
-        f"📤 Ответов от админов: **{admin_replies}**"
-    )
-    await message.answer(text, parse_mode="Markdown")
+# --- УПРАВЛЕНИЕ РОЛЯМИ ---
 
-@dp.message(Command("broadcast"))
-async def broadcast_cmd(message: Message):
-    if not db.is_admin(message.from_user.id, OWNER_ID):
-        return
-    
-    text_to_send = message.text.replace("/broadcast", "").strip()
-    if not text_to_send:
-        return await message.answer("Использование: `/broadcast Ваш текст`", parse_mode="Markdown")
-    
-    users = db.get_all_users()
-    count = 0
-    blocked_count = 0
-    
-    for u_id in users:
-        try:
-            await bot.send_message(u_id, text_to_send)
-            count += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            db.set_user_blocked(u_id, True)
-            blocked_count += 1
-            
-    await message.answer(f"📢 **Рассылка завершена!**\n\n✅ Доставлено: **{count}**\n🚫 Заблокировали бота: **{blocked_count}**", parse_mode="Markdown")
-
-@dp.message(Command("addadmin"))
-async def add_admin_cmd(message: Message):
-    if not db.is_admin(message.from_user.id, OWNER_ID):
-        return await message.answer("У вас нет прав для этой команды.")
-    
-    args = message.text.split(maxsplit=2)
-    if len(args) < 2:
-        return await message.answer("Использование: `/addadmin <user_id> [@username]`", parse_mode="Markdown")
-    
-    try:
-        new_admin_id = int(args[1])
-        username = args[2] if len(args) > 2 else "Без юзернейма"
-        db.add_admin(new_admin_id, username)
-        await message.answer(f"✅ Пользователь {new_admin_id} ({username}) добавлен в список админов!")
-    except ValueError:
-        await message.answer("ID пользователя должен быть числом!")
-
-# Обработка сообщений от пользователей в ЛС
-@dp.message(F.chat.type == "private")
-async def user_message_handler(message: Message):
-    db.add_user(message.from_user.id)
-    db.increment_stat("user_messages")
-    
-    user_id = message.from_user.id
-    user_name = message.from_user.full_name
-    thread_id = db.get_thread_id(user_id)
-
-    if not thread_id:
-        try:
-            topic = await bot.create_forum_topic(
-                chat_id=GROUP_CHAT_ID,
-                name=f"{user_name} | ID: {user_id}"
-            )
-            thread_id = topic.message_thread_id
-            db.save_topic(user_id, thread_id)
-        except Exception as e:
-            logging.error(f"Ошибка создания топика: {e}")
-            return
-
-    try:
-        await bot.copy_message(
-            chat_id=GROUP_CHAT_ID,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
-            message_thread_id=thread_id
-        )
-    except Exception:
-        try:
-            topic = await bot.create_forum_topic(
-                chat_id=GROUP_CHAT_ID,
-                name=f"{user_name} | ID: {user_id}"
-            )
-            thread_id = topic.message_thread_id
-            db.save_topic(user_id, thread_id)
-            await bot.copy_message(
-                chat_id=GROUP_CHAT_ID,
-                from_chat_id=message.chat.id,
-                message_id=message.message_id,
-                message_thread_id=thread_id
-            )
-        except Exception as ex:
-            logging.error(f"Ошибка отправки: {ex}")
-
-# Обработка ответов админов из группы (ИГНОРИРУЕМ системные служебные сообщения)
-@dp.message(F.chat.id == GROUP_CHAT_ID)
-async def admin_reply_handler(message: Message):
-    # Если это системное сообщение о создании темы/закрепе — пропуск!
-    if message.forum_topic_created or message.forum_topic_edited or message.forum_topic_closed or message.is_automatic_forward:
+# 👑 1. Назначить ДИРЕКТОРА (Только Владелец)
+@dp.message(Command("set_director"))
+async def set_director_cmd(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply("❌ Назначать Директоров может только Владелец бота!")
         return
 
-    if not message.message_thread_id:
+    target_id = extract_target_user_id(message)
+    if not target_id:
+        await message.reply("⚠️ Ответьте на сообщение пользователя или напишите: `/set_director 123456789`")
         return
 
-    thread_id = message.message_thread_id
-    user_id = db.get_user_by_thread(thread_id)
+    await set_user_role(target_id, None, "director")
+    await message.reply(f"✅ Пользователю `{target_id}` успешно присвоена роль **Директор** 💼")
 
-    if not user_id:
-        try:
-            topic_info = message.reply_to_message.forum_topic_created if message.reply_to_message else None
-            if topic_info and "ID:" in topic_info.name:
-                extracted_id = int(topic_info.name.split("ID:")[1].strip())
-                db.save_topic(extracted_id, thread_id)
-                user_id = extracted_id
-        except Exception as e:
-            logging.error(f"Не удалось восстановить ID: {e}")
+# ⭐️ 2. Назначить АДМИНА (Владелец и Директора)
+@dp.message(Command("set_admin"))
+async def set_admin_cmd(message: types.Message):
+    user_role = await get_user_role(message.from_user.id)
+    
+    if user_role not in ["owner", "director"]:
+        await message.reply("❌ Назначать Администраторов могут только Директора и Владелец!")
+        return
 
-    if user_id:
-        try:
-            await bot.copy_message(
-                chat_id=user_id,
-                from_chat_id=GROUP_CHAT_ID,
-                message_id=message.message_id
-            )
-            db.increment_stat("admin_replies")
-            db.set_user_blocked(user_id, False)
-        except Exception:
-            db.set_user_blocked(user_id, True)
-            await message.answer("❌ Не удалось отправить ответ. Пользователь заблокировал бота.")
+    target_id = extract_target_user_id(message)
+    if not target_id:
+        await message.reply("⚠️ Ответьте на сообщение пользователя или напишите: `/set_admin 123456789`")
+        return
 
-async def handle_ping(request):
-    return web.Response(text="Bot is running!")
+    await set_user_role(target_id, None, "admin")
+    await message.reply(f"✅ Пользователю `{target_id}` успешно присвоена роль **Администратор** 🛡")
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    app.router.add_get("/health", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+# 🔰 3. Назначить СТАЖЁРА (Владелец и Директора)
+@dp.message(Command("set_intern"))
+async def set_intern_cmd(message: types.Message):
+    user_role = await get_user_role(message.from_user.id)
+    
+    if user_role not in ["owner", "director"]:
+        await message.reply("❌ Назначать Стажёров могут только Директора и Владелец!")
+        return
 
+    target_id = extract_target_user_id(message)
+    if not target_id:
+        await message.reply("⚠️ Ответьте на сообщение пользователя или напишите: `/set_intern 123456789`")
+        return
+
+    await set_user_role(target_id, None, "intern")
+    await message.reply(f"✅ Пользователю `{target_id}` успешно присвоена роль **Стажёр** 🔰")
+
+# 🚫 4. Снять роль (Разжаловать до обычного пользователя)
+@dp.message(Command("demote"))
+async def demote_cmd(message: types.Message):
+    user_role = await get_user_role(message.from_user.id)
+    
+    if user_role not in ["owner", "director"]:
+        await message.reply("❌ Снимать роли могут только Директора и Владелец!")
+        return
+
+    target_id = extract_target_user_id(message)
+    if not target_id:
+        await message.reply("⚠️ Ответьте на сообщение пользователя или напишите: `/demote 123456789`")
+        return
+
+    if target_id == OWNER_ID:
+        await message.reply("❌ Нельзя снять роль с Владельца бота!")
+        return
+
+    await set_user_role(target_id, None, "user")
+    await message.reply(f"🗑 Роль с пользователя `{target_id}` снята. Теперь он обычный пользователь.")
+
+# --- ЗАПУСК БОТА ---
 async def main():
-    db.init_db()
     logging.basicConfig(level=logging.INFO)
-    asyncio.create_task(start_web_server())
-    await asyncio.sleep(1)
-    
-    await bot.delete_webhook(drop_pending_updates=True)
-    # Слушаем ТОЛЬКО сообщения (игнорируем служебный спам от Telegram API)
+    await init_db()
+    print("Бот успешно запущен!")
     await dp.start_polling(bot, allowed_updates=["message"])
 
 if __name__ == "__main__":
