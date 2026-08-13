@@ -3,15 +3,16 @@ import logging
 import asyncpg
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
 
-# --- НАСТРОЙКА ---
+# --- НАСТРОЙКИ ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", 0)) if os.getenv("ADMIN_CHAT_ID") else None
 OWNER_ID = 8674242517
 
 bot = Bot(token=BOT_TOKEN)
@@ -29,13 +30,14 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS admin_actions (id SERIAL PRIMARY KEY, admin_id BIGINT, admin_username TEXT, target_user_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         """)
 
+# --- ПРОВЕРКИ РОЛЕЙ ---
 async def is_admin(user_id: int) -> bool:
     if user_id == OWNER_ID: return True
     if not db_pool: return False
     try:
         async with db_pool.acquire() as conn:
             role = await conn.fetchval("SELECT role FROM users WHERE user_id = $1;", user_id)
-            return str(role).lower() in ["director", "admin", "intern"]
+            return str(role).lower() in ["director", "admin", "intern", "owner"]
     except: return False
 
 # --- СТАТИСТИКА БОТА (/stats) ---
@@ -50,7 +52,6 @@ async def stats_cmd(message: types.Message):
         admins = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';") or 0
         interns = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';") or 0
         users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'user';") or 0
-        
         u_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'user';") or 0
         a_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'admin';") or 0
         
@@ -93,6 +94,34 @@ async def process_admin_stats(message: types.Message):
 async def admin_stats_cmd(message: types.Message): await process_admin_stats(message)
 @dp.message(F.text.lower().startswith(".астат"))
 async def admin_stats_dot(message: types.Message): await process_admin_stats(message)
+
+# --- ЛОГИКА ПЕРЕСЫЛКИ И ТОПИКОВ ---
+@dp.message(F.chat.type == "private")
+async def forward_user_message(message: types.Message):
+    if message.text and message.text.startswith("/"): return
+    user_id = message.from_user.id
+    username = message.from_user.username or "отсутствует"
+    
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
+        if not row:
+            topic = await bot.create_forum_topic(chat_id=ADMIN_CHAT_ID, name=message.from_user.full_name)
+            await conn.execute("INSERT INTO users (user_id, username, topic_id) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET topic_id = $3;", user_id, username, topic.message_thread_id)
+            topic_id = topic.message_thread_id
+        else:
+            topic_id = row["topic_id"]
+        await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'user');", user_id)
+    
+    await bot.copy_message(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id, from_chat_id=message.chat.id, message_id=message.message_id)
+
+@dp.message(F.chat.id == ADMIN_CHAT_ID)
+async def reply_from_topic(message: types.Message):
+    if not message.message_thread_id: return
+    async with db_pool.acquire() as conn:
+        user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
+        if user_id:
+            await bot.copy_message(chat_id=user_id, from_chat_id=ADMIN_CHAT_ID, message_id=message.message_id)
+            await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'admin');", user_id)
 
 # --- ЗАПУСК ---
 @dp.message(Command("start"))
