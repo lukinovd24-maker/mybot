@@ -189,7 +189,6 @@ async def process_admin_stats(message: types.Message):
             return
 
         if not db_pool:
-            logger.error("Database pool is None!")
             await message.reply("⚠️ База данных недоступна!")
             return
 
@@ -228,9 +227,13 @@ async def process_admin_stats(message: types.Message):
                 return "<i>Пока нет данных</i>\n"
             res = ""
             for idx, r in enumerate(rows, 1):
-                username_val = r.get('admin_username') if hasattr(r, 'get') else r['admin_username']
-                name = f"@{username_val}" if username_val and username_val != 'отсутствует' else f"ID: {r['admin_id']}"
-                res += f"{idx}. {name} — <b>{r['count']}</b>\n"
+                row_dict = dict(r)
+                uid = row_dict.get('admin_id')
+                uname = row_dict.get('admin_username')
+                cnt = row_dict.get('count', 0)
+                
+                name = f"@{uname}" if uname and uname != 'отсутствует' else f"ID: {uid}"
+                res += f"{idx}. {name} — <b>{cnt}</b>\n"
             return res
 
         text = (
@@ -241,9 +244,10 @@ async def process_admin_stats(message: types.Message):
             f"🏆 <b>За всё время:</b>\n{format_rows(total_rows)}"
         )
         await message.reply(text, parse_mode=ParseMode.HTML)
+
     except Exception as e:
-        logger.exception("❌ Ошибка в process_admin_stats")
-        await message.reply(f"❌ Произошла ошибка при выполнении команды.")
+        logger.exception("Ошибка в admin_stats")
+        await message.reply(f"❌ Ошибка: {str(e)}")
 
 @dp.message(Command("adminstats"))
 async def admin_stats_cmd(message: types.Message):
