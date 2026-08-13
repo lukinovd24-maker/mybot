@@ -72,6 +72,19 @@ async def is_director_or_owner(user_id: int) -> bool:
     role = await get_user_role(user_id)
     return str(role).lower() in ["owner", "director"]
 
+async def is_owner(user_id: int) -> bool:
+    return user_id == OWNER_ID or (await get_user_role(user_id)) == "owner"
+
+# --- ПОИСК ПОЛЬЗОВАТЕЛЯ ДЛЯ КОМАНД ---
+async def get_target_user_id(conn, arg: str) -> int:
+    arg = arg.strip()
+    if arg.isdigit():
+        return int(arg)
+    if arg.startswith("@"):
+        arg = arg[1:]
+    row = await conn.fetchrow("SELECT user_id FROM users WHERE LOWER(username) = LOWER($1);", arg)
+    return row["user_id"] if row else None
+
 # --- КОМАНДА /START ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -106,10 +119,73 @@ async def help_cmd(message: types.Message):
         text += "🛡 <b>Администрации:</b>\n├ /stats — Статистика бота\n└ /check — Проверить пользователя\n"
     elif role == "director":
         text += "💼 <b>Директорат:</b>\n├ Одобрение смены админов\n├ /ban /unban [ID]\n└ /rest [юз/ID] [дни]\n"
-    elif role == "owner":
-        text += "👑 <b>Владелец:</b>\n├ Полный контроль ролей и бота\n"
+    
+    # Для владельца выводим полный список
+    if role == "owner" or user_id == OWNER_ID:
+        text += (
+            "👑 <b>Владелец:</b>\n"
+            "├ /setdirector [ID/юз] — Назначить директором\n"
+            "├ /setadmin [ID/юз] — Назначить администратором\n"
+            "├ /setintern [ID/юз] — Назначить стажером\n"
+            "├ /demote [ID/юз] — Снять с должности\n"
+            "├ /ban /unban [ID] — Бан/разбан\n"
+            "└ /stats — Статистика\n"
+        )
 
     await message.reply(text, parse_mode=ParseMode.HTML)
+
+# --- УПРАВЛЕНИЕ РОЛЯМИ (Только Владелец) ---
+@dp.message(Command("setdirector"))
+async def set_director_cmd(message: types.Message, command: CommandObject):
+    if not await is_owner(message.from_user.id) or not command.args:
+        return
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            target_id = await get_target_user_id(conn, command.args)
+            if not target_id:
+                await message.reply("❌ Пользователь не найден в базе данных.")
+                return
+            await conn.execute("UPDATE users SET role = 'director' WHERE user_id = $1;", target_id)
+            await message.reply(f"💼 Пользователь <code>{target_id}</code> назначен <b>Директором</b>.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("setadmin"))
+async def set_admin_cmd(message: types.Message, command: CommandObject):
+    if not await is_owner(message.from_user.id) or not command.args:
+        return
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            target_id = await get_target_user_id(conn, command.args)
+            if not target_id:
+                await message.reply("❌ Пользователь не найден в базе данных.")
+                return
+            await conn.execute("UPDATE users SET role = 'admin' WHERE user_id = $1;", target_id)
+            await message.reply(f"🛡 Пользователь <code>{target_id}</code> назначен <b>Администратором</b>.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("setintern"))
+async def set_intern_cmd(message: types.Message, command: CommandObject):
+    if not await is_owner(message.from_user.id) or not command.args:
+        return
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            target_id = await get_target_user_id(conn, command.args)
+            if not target_id:
+                await message.reply("❌ Пользователь не найден в базе данных.")
+                return
+            await conn.execute("UPDATE users SET role = 'intern' WHERE user_id = $1;", target_id)
+            await message.reply(f"🔰 Пользователь <code>{target_id}</code> назначен <b>Стажером</b>.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("demote"))
+async def demote_cmd(message: types.Message, command: CommandObject):
+    if not await is_owner(message.from_user.id) or not command.args:
+        return
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            target_id = await get_target_user_id(conn, command.args)
+            if not target_id:
+                await message.reply("❌ Пользователь не найден в базе данных.")
+                return
+            await conn.execute("UPDATE users SET role = 'user' WHERE user_id = $1;", target_id)
+            await message.reply(f"👤 Пользователь <code>{target_id}</code> разжалован до обычного пользователя.", parse_mode=ParseMode.HTML)
 
 # --- ЗАПРОС СМЕНЫ АДМИНА ПОЛЬЗОВАТЕЛЕМ ---
 @dp.message(Command("change_admin"))
