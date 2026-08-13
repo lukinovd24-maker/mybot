@@ -27,7 +27,7 @@ dp = Dispatcher()
 
 db_pool = None
 
-# --- СОСТОЯНИЯ ДЛЯ FSM (Запрос смены админа пользователем) ---
+# --- СОСТОЯНИЯ ДЛЯ FSM ---
 class ChangeAdminState(StatesGroup):
     waiting_for_reason = State()
 
@@ -89,7 +89,7 @@ async def start_cmd(message: types.Message):
         "перед тем как начать общение, прошу заглянуть в наш тгк: https://t.me/eve_ning_glow\n"
         "там вся важная информация.\n"
         "Прочитал? тогда пиши \"привет общение/поддержка/уни\" и к тебе придет админ.\n\n"
-        "🔄 Если хотите сменить текущего администратора, отправьте команду: /change_admin"
+        "🔄 Чтобы запросить смену администратора, отправьте команду: /change_admin"
     )
     await message.reply(start_text, disable_web_page_preview=False)
 
@@ -111,7 +111,7 @@ async def help_cmd(message: types.Message):
 
     await message.reply(text, parse_mode=ParseMode.HTML)
 
-# --- ЗАПРОС СМЕНЫ АДМИНА ОТ ПОЛЬЗОВАТЕЛЯ ---
+# --- ЗАПРОС СМЕНЫ АДМИНА ПОЛЬЗОВАТЕЛЕМ ---
 @dp.message(Command("change_admin"))
 async def user_request_change_admin(message: types.Message, state: FSMContext):
     if message.chat.type != "private":
@@ -138,7 +138,7 @@ async def process_change_reason(message: types.Message, state: FSMContext):
     await state.clear()
     await message.reply("✅ Ваш запрос на смену администратора отправлен руководству. Ожидайте одобрения.")
 
-    if not db_pool or not ADMIN_CHAT_ID:
+    if not db_pool or not ADMIN_CHAT_ID or not UNASSIGNED_TOPIC_ID:
         return
 
     async with db_pool.acquire() as conn:
@@ -148,7 +148,6 @@ async def process_change_reason(message: types.Message, state: FSMContext):
         clean_chat_id = str(ADMIN_CHAT_ID).replace("-100", "")
         topic_link = f"https://t.me/c/{clean_chat_id}/{topic_id}"
 
-        # Клавиатура для одобрения директором/влд
         keyboard = types.InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -159,41 +158,29 @@ async def process_change_reason(message: types.Message, state: FSMContext):
         )
 
         request_text = (
-            "⚠️ <b>Запрос на смену администратора от пользователя!</b>\n\n"
+            "🔄 <b>Запрос на смену администратора!</b>\n\n"
             f"👤 Пользователь: <b>{full_name}</b> (@{username}) [ID: <code>{user_id}</code>]\n"
             f"💬 <b>Причина:</b> {reason}\n"
             f"🔗 <a href='{topic_link}'>Перейти в топик пользователя</a>"
         )
 
         try:
-            # 1. Отправляем в личный топик пользователя
             await bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
-                message_thread_id=topic_id,
+                message_thread_id=UNASSIGNED_TOPIC_ID,
                 text=request_text,
                 reply_markup=keyboard,
-                parse_mode=ParseMode.HTML
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
             )
-
-            # 2. Отправляем в общий топик «Пользователи без админа»
-            if UNASSIGNED_TOPIC_ID:
-                await bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    message_thread_id=UNASSIGNED_TOPIC_ID,
-                    text=request_text,
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True
-                )
         except Exception as e:
-            logger.error(f"Ошибка отправки запроса смены админа: {e}")
+            logger.error(f"Ошибка отправки запроса смены админа в общий топик: {e}")
 
-# --- ОБРАБОТЧИК КНОПОК ОДОБРЕНИЯ / ОТКЛОНЕНИЯ СМЕНЫ АДМИНА (Только для Директора / Владельца) ---
+# --- ОБРАБОТЧИК КНОПОК ОДОБРЕНИЯ / ОТКЛОНЕНИЯ СМЕНЫ ---
 @dp.callback_query(F.data.startswith("approve_change_") | F.data.startswith("reject_change_"))
 async def handle_change_decision(callback: types.CallbackQuery):
     actor_id = callback.from_user.id
     
-    # Проверяем, является ли пользователь директором или владельцем
     if not await is_director_or_owner(actor_id):
         await callback.answer("⛔️ Одобрять или отклонять смену администратора могут только Директора и Владелец!", show_alert=True)
         return
@@ -203,12 +190,9 @@ async def handle_change_decision(callback: types.CallbackQuery):
     original_text = callback.message.html_text
 
     if action == "approve":
-        # Одобрено: сбрасываем текущего админа, делаем ПЗ свободным
-        new_status_block = "\n\n✅ <b>Статус:</b> Смена админа одобрена директором. <b>Никто не взял ПЗ</b>"
-        updated_text = original_text + new_status_block
+        updated_text = original_text + "\n\n✅ <b>Статус:</b> Смена админа одобрена. <b>ПЗ снова свободно</b>"
         
         try:
-            # Уведомляем пользователя
             await bot.send_message(target_user_id, "✅ Руководство одобрило смену вашего администратора. Скоро к вам подключится новый специалист!")
         except:
             pass
@@ -220,9 +204,7 @@ async def handle_change_decision(callback: types.CallbackQuery):
             logger.error(f"Ошибка одобрения смены: {e}")
 
     else:
-        # Отклонено
-        new_status_block = "\n\n❌ <b>Статус:</b> Запрос на смену админа отклонен руководством."
-        updated_text = original_text + new_status_block
+        updated_text = original_text + "\n\n❌ <b>Статус:</b> Запрос на смену админа отклонен руководством."
         
         try:
             await bot.send_message(target_user_id, "❌ Руководство отклонило ваш запрос на смену администратора.")
