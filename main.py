@@ -132,9 +132,8 @@ async def help_cmd(message: types.Message):
 
     await message.reply(text, parse_mode=ParseMode.HTML)
 
-# --- КОМАНДА УЗНАТЬ ID (ДЛЯ ВЛАДЕЛЬЦА И ДИРЕКТОРОВ) ---
-@dp.message(F.text.lower().startswith(".ид") | Command("id"))
-async def get_user_id_cmd(message: types.Message):
+# --- ЛОГИКА УЗНАТЬ ID ---
+async def process_get_user_id(message: types.Message):
     if not await is_top_admin(message.from_user.id):
         await message.reply("❌ Эта команда доступна только Владельцу и Директорам!")
         return
@@ -185,6 +184,14 @@ async def get_user_id_cmd(message: types.Message):
             "Используйте команду в нужном топике, либо ответьте на сообщение юзера, или напишите: <code>.ид @username</code>", 
             parse_mode=ParseMode.HTML
         )
+
+@dp.message(F.text.lower().startswith(".ид"))
+async def get_user_id_by_dot(message: types.Message):
+    await process_get_user_id(message)
+
+@dp.message(Command("id"))
+async def get_user_id_by_command(message: types.Message):
+    await process_get_user_id(message)
 
 # --- УПРАВЛЕНИЕ РОЛЯМИ ---
 async def change_role(message: types.Message, command: CommandObject, new_role: str, role_name: str):
@@ -395,11 +402,9 @@ async def forward_user_message(message: types.Message):
 # --- ОТВЕТ АДМИНА ИЗ ТОПИКА ПОЛЬЗОВАТЕЛЮ ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def reply_from_topic(message: types.Message):
-    # Игнорируем служебные сообщения системных событий Telegram
     if message.forum_topic_created or message.forum_topic_edited:
         return
 
-    # Игнорируем сообщения без топика, команды с / или точки
     if not message.message_thread_id or (message.text and (message.text.startswith("/") or message.text.startswith("."))):
         return
 
