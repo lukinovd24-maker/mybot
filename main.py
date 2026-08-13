@@ -330,10 +330,11 @@ async def stats_cmd(message: types.Message):
     )
     await message.reply(text, parse_mode=ParseMode.HTML)
 
-# --- ПЕРЕСЫЛКА СООБЩЕНИЙ С СОЗДАНИЕМ ТОПИКА ---
+# --- ПЕРЕСЫЛКА СООБЩЕНИЙ С СОЗДАНИЕМ ТОПИКА И ЛОГАМИ ---
 @dp.message(F.chat.type == "private")
 async def forward_user_message(message: types.Message):
     if not ADMIN_CHAT_ID:
+        logging.error("❌ ОШИБКА: ADMIN_CHAT_ID не задан в переменных окружения!")
         return
 
     # Пропускаем стандартные команды
@@ -355,11 +356,15 @@ async def forward_user_message(message: types.Message):
 
             topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
 
+            # Если топика нет — создаем новый
             if not topic_id:
                 try:
                     topic_title = f"{full_name} (@{username})"[:128]
+                    logging.info(f"🔄 Создаем новый топик для {user_id} в чате {ADMIN_CHAT_ID}...")
+                    
                     new_topic = await bot.create_forum_topic(chat_id=ADMIN_CHAT_ID, name=topic_title)
                     topic_id = new_topic.message_thread_id
+                    logging.info(f"✅ Топик успешно создан! ID топика: {topic_id}")
 
                     await conn.execute("""
                         INSERT INTO users (user_id, username, topic_id) 
@@ -367,12 +372,12 @@ async def forward_user_message(message: types.Message):
                         ON CONFLICT (user_id) DO UPDATE SET topic_id = $3, username = $2;
                     """, user_id, username, topic_id)
                 except Exception as e:
-                    logging.error(f" Ошибка при создании топика: {e}")
+                    logging.error(f"❌ ОШИБКА СОЗДАНИЯ ТОПИКА: {e}")
                     topic_id = None
 
             await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'user');", user_id)
 
-    # Пересылка исключительно в персональный топик
+    # Пересылка исключительно в топик
     if topic_id:
         try:
             await bot.copy_message(
@@ -381,13 +386,16 @@ async def forward_user_message(message: types.Message):
                 from_chat_id=message.chat.id, 
                 message_id=message.message_id
             )
+            logging.info(f"📨 Сообщение от {user_id} доставлено в топик {topic_id}")
         except Exception as e:
-            logging.error(f"Не удалось переслать сообщение в топик {topic_id}: {e}")
+            logging.error(f"❌ ОШИБКА ОТПРАВКИ СООБЩЕНИЯ В ТОПИК {topic_id}: {e}")
+    else:
+        logging.error(f"⚠️ Сообщение не отправлено: topic_id равен None (проверьте права бота в чате).")
 
 # --- ОТВЕТ АДМИНА ИЗ ТОПИКА ПОЛЬЗОВАТЕЛЮ ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def reply_from_topic(message: types.Message):
-    # Игнорируем служебные сообщения системы Telegram (создание топика и т.д.)
+    # Игнорируем служебные сообщения системных событий Telegram
     if message.forum_topic_created or message.forum_topic_edited:
         return
 
