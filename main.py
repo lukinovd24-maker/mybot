@@ -13,6 +13,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
+# ⚠️ УКАЖИ ЗДЕСЬ СВОЙ TELEGRAM ID (например: 1234567890)
+OWNER_ID = 8674242517  # Замени эти цифры на свой ID в Telegram!
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -43,12 +46,12 @@ async def init_db():
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
             """)
             
-            # Таблица сообщений (для подсчета активности)
+            # Таблица сообщений
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
-                    sender_type TEXT, -- 'user' или 'admin'
+                    sender_type TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -60,8 +63,13 @@ async def init_db():
 
 # --- ПОЛУЧЕНИЕ РОЛИ ПОЛЬЗОВАТЕЛЯ ---
 async def get_user_role(user_id: int) -> str:
+    # 1. Если это твой ID — ты ВСЕГДА владелец
+    if user_id == OWNER_ID:
+        return "owner"
+        
     if not db_pool:
         return "user"
+        
     try:
         async with db_pool.acquire() as conn:
             role = await conn.fetchval("SELECT role FROM users WHERE user_id = $1;", user_id)
@@ -72,15 +80,37 @@ async def get_user_role(user_id: int) -> str:
 # --- КОМАНДА /START ---
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
+    role = "owner" if message.from_user.id == OWNER_ID else "user"
+    
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO users (user_id, username) 
-                VALUES ($1, $2)
-                ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username;
-            """, message.from_user.id, message.from_user.username)
+                INSERT INTO users (user_id, username, role) 
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) DO UPDATE SET 
+                    username = EXCLUDED.username,
+                    role = CASE WHEN users.user_id = $1 AND $3 = 'owner' THEN 'owner' ELSE users.role END;
+            """, message.from_user.id, message.from_user.username, role)
             
     await message.reply("👋 Привет! Бот работает и готов к приёму сообщений.")
+
+# --- КОМАНДА ДЛЯ ВЫДАЧИ ВЛАДЕЛЬЦА СЕБЕ В БазеДанных ---
+@dp.message(Command("setowner"))
+async def set_owner_cmd(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply("❌ Эта команда доступна только главному владельцу!")
+        return
+
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO users (user_id, username, role) 
+                VALUES ($1, $2, 'owner')
+                ON CONFLICT (user_id) DO UPDATE SET role = 'owner';
+            """, message.from_user.id, message.from_user.username)
+        await message.reply("👑 Ваша роль 'Владелец' успешно записана в базу данных!")
+    else:
+        await message.reply("⚠️ База данных недоступна.")
 
 # --- КОМАНДА /STATS ---
 @dp.message(Command("stats"))
@@ -102,6 +132,7 @@ async def stats_cmd(message: types.Message):
             clean_users = total_users - banned_users
 
             # 2. Роли
+            owners = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'owner';") or 1
             directors = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'director';") or 0
             admins = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';") or 0
             interns = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';") or 0
@@ -120,7 +151,7 @@ async def stats_cmd(message: types.Message):
             f"└ 🚫 Забаненных: <b>{banned_users}</b>\n\n"
             
             "🎭 <b>Разделение по ролям:</b>\n"
-            f"├ 👑 Владелец: <b>1</b>\n"
+            f"├ 👑 Владелец: <b>{owners}</b>\n"
             f"├ 💼 Директоров: <b>{directors}</b>\n"
             f"├ 🛡 Администраторов: <b>{admins}</b>\n"
             f"├ 🔰 Стажёров: <b>{interns}</b>\n"
