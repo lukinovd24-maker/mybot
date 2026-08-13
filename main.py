@@ -57,7 +57,7 @@ async def init_db():
         db_error_msg = str(e)
         logging.error(f"Ошибка подключения к БД: {e}")
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И РОЛИ ---
 async def get_user_role(user_id: int) -> str:
     if user_id == OWNER_ID:
         return "owner"
@@ -66,17 +66,19 @@ async def get_user_role(user_id: int) -> str:
     try:
         async with db_pool.acquire() as conn:
             role = await conn.fetchval("SELECT role FROM users WHERE user_id = $1;", user_id)
+            logging.info(f"🔍 Проверка роли для {user_id}: найдена роль -> {role}")
             return role or "user"
-    except Exception:
+    except Exception as e:
+        logging.error(f"❌ Ошибка при получении роли для {user_id}: {e}")
         return "user"
 
 async def is_admin(user_id: int) -> bool:
     role = await get_user_role(user_id)
-    return role in ["owner", "director", "admin", "intern"]
+    return str(role).lower() in ["owner", "director", "admin", "intern"]
 
 async def is_top_admin(user_id: int) -> bool:
     role = await get_user_role(user_id)
-    return role in ["owner", "director"]
+    return str(role).lower() in ["owner", "director"]
 
 # --- КОМАНДА /START ---
 @dp.message(Command("start"))
@@ -114,6 +116,7 @@ async def help_cmd(message: types.Message):
     if user_is_admin:
         text += "🛡 <b>Администрации:</b>\n"
         text += "├ /stats — Статистика бота\n"
+        text += "├ /check или .чек — Проверить пользователя\n"
         text += "├ /ban [ID] — Заблокировать пользователя\n"
         text += "├ /unban [ID] — Разблокировать пользователя\n"
         text += "├ /broadcast [текст] — Рассылка пользователям\n"
@@ -192,6 +195,73 @@ async def get_user_id_by_dot(message: types.Message):
 @dp.message(Command("id"))
 async def get_user_id_by_command(message: types.Message):
     await process_get_user_id(message)
+
+# --- ПРОВЕРКА ПОЛЬЗОВАТЕЛЯ (/check и .чек) ---
+async def process_check_user(message: types.Message):
+    if not await is_admin(message.from_user.id):
+        await message.reply("❌ Эта команда доступна только администрации!")
+        return
+
+    target_user_id = None
+    target_username = None
+
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("@"):
+        target_username = args[1].replace("@", "").strip()
+    elif len(args) > 1 and args[1].isdigit():
+        target_user_id = int(args[1])
+    elif message.reply_to_message:
+        if message.reply_to_message.forward_from:
+            target_user_id = message.reply_to_message.forward_from.id
+            target_username = message.reply_to_message.forward_from.username
+        elif message.message_thread_id and db_pool:
+            async with db_pool.acquire() as conn:
+                target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
+    elif message.message_thread_id and db_pool:
+        async with db_pool.acquire() as conn:
+            target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
+
+    if not db_pool:
+        await message.reply("⚠️ База данных недоступна!")
+        return
+
+    async with db_pool.acquire() as conn:
+        if target_username and not target_user_id:
+            row = await conn.fetchrow("SELECT user_id, username, role, is_banned, topic_id FROM users WHERE LOWER(username) = LOWER($1);", target_username)
+        elif target_user_id:
+            row = await conn.fetchrow("SELECT user_id, username, role, is_banned, topic_id FROM users WHERE user_id = $1;", target_user_id)
+        else:
+            row = None
+
+        if not row:
+            await message.reply("⚠️ Пользователь не найден в базе данных бота.", parse_mode=ParseMode.HTML)
+            return
+
+        user_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE user_id = $1 AND sender_type = 'user';", row["user_id"]) or 0
+        admin_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE user_id = $1 AND sender_type = 'admin';", row["user_id"]) or 0
+
+    status = "🚫 Забанен" if row["is_banned"] else "🍏 Активен"
+    
+    text = (
+        "🔍 👤 <b>Подробная проверка пользователя:</b>\n\n"
+        f"🆔 Telegram ID: <code>{row['user_id']}</code>\n"
+        f"👤 Юзернейм: @{row['username'] or 'отсутствует'}\n"
+        f"🎭 Роль в боте: <b>{row['role']}</b>\n"
+        f"📌 Статус: <b>{status}</b>\n"
+        f"📁 ID топика: <code>{row['topic_id'] or 'нет топика'}</code>\n\n"
+        "✉️ <b>Статистика диалога:</b>\n"
+        f"├ Сообщений от юзера: <b>{user_msgs}</b>\n"
+        f"└ Ответов от админов: <b>{admin_msgs}</b>"
+    )
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+@dp.message(F.text.lower().startswith(".чек"))
+async def check_user_by_dot(message: types.Message):
+    await process_check_user(message)
+
+@dp.message(Command("check"))
+async def check_user_by_command(message: types.Message):
+    await process_check_user(message)
 
 # --- УПРАВЛЕНИЕ РОЛЯМИ ---
 async def change_role(message: types.Message, command: CommandObject, new_role: str, role_name: str):
@@ -344,7 +414,6 @@ async def forward_user_message(message: types.Message):
         logging.error("❌ ОШИБКА: ADMIN_CHAT_ID не задан в переменных окружения!")
         return
 
-    # Пропускаем стандартные команды
     if message.text and message.text.startswith("/"):
         return
 
@@ -363,7 +432,6 @@ async def forward_user_message(message: types.Message):
 
             topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
 
-            # Если топика нет — создаем новый
             if not topic_id:
                 try:
                     topic_title = f"{full_name} (@{username})"[:128]
@@ -384,7 +452,6 @@ async def forward_user_message(message: types.Message):
 
             await conn.execute("INSERT INTO messages (user_id, sender_type) VALUES ($1, 'user');", user_id)
 
-    # Пересылка исключительно в топик
     if topic_id:
         try:
             await bot.copy_message(
