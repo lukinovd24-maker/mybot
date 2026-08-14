@@ -45,7 +45,6 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS admin_actions (id SERIAL PRIMARY KEY, admin_id BIGINT, admin_username TEXT, target_user_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
             """)
             
-            # Безопасное добавление колонки admin_tag, если её еще нет
             try:
                 await conn.execute("ALTER TABLE users ADD COLUMN admin_tag TEXT;")
             except asyncpg.exceptions.DuplicateColumnError:
@@ -116,6 +115,121 @@ async def help_cmd(message: types.Message):
     )
     await message.reply(help_text, parse_mode=ParseMode.HTML)
 
+@dp.message(Command("stats"))
+async def stats_cmd(message: types.Message):
+    if not await is_admin(message.from_user.id): return
+    async with db_pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users;")
+        banned_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned = TRUE;")
+        active_users = total_users - banned_users
+        
+        owners = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'owner';")
+        directors = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'director';")
+        admins = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'admin';")
+        interns = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'intern';")
+        regular_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE role = 'user' OR role IS NULL;")
+        
+        user_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'user';")
+        admin_msgs = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE sender_type = 'admin';")
+        total_msgs = user_msgs + admin_msgs
+
+    stats_text = (
+        "📊 <b>Полная статистика бота:</b>\n\n"
+        "👥 <b>Пользователи:</b>\n"
+        f"├ Всего пользователей: {total_users}\n"
+        f"├ 🍏 Активных (чистых): {active_users}\n"
+        f"└ 🚫 Забаненных: {banned_users}\n\n"
+        "🎭 <b>Разделение по ролям:</b>\n"
+        f"├ 👑 Владелец: {owners if owners else 1}\n"
+        f"├ 💼 Директоров: {directors}\n"
+        f"├ 🛡 Администраторов: {admins}\n"
+        f"├ 🔰 Стажёров: {interns}\n"
+        f"└ 👤 Пользователей: {regular_users}\n\n"
+        "✉️ <b>Сообщения и активность:</b>\n"
+        f"├ 📩 От пользователей: {user_msgs}\n"
+        f"├ 📤 От администраторов: {admin_msgs}\n"
+        f"└ 💬 Всего сообщений: {total_msgs}"
+    )
+    await message.reply(stats_text, parse_mode=ParseMode.HTML)
+
+@dp.message(F.text.in_({"/adminstats", ".астат"}))
+@dp.message(Command("adminstats"))
+async def adminstats_cmd(message: types.Message):
+    if not await is_admin(message.from_user.id): return
+    
+    async with db_pool.acquire() as conn:
+        async def get_top(days=None):
+            time_clause = f"WHERE created_at >= NOW() - INTERVAL '{days} days'" if days else ""
+            rows = await conn.fetch(f"""
+                SELECT admin_username, COUNT(*) as cnt 
+                FROM admin_actions 
+                {time_clause} 
+                GROUP BY admin_username 
+                ORDER BY cnt DESC LIMIT 5;
+            """)
+            return rows
+
+        today_rows = await get_top(1)
+        week_rows = await get_top(7)
+        month_rows = await get_top(30)
+        all_rows = await get_top(None)
+
+    def format_rows(rows):
+        if not rows:
+            return "<i>Нет данных</i>"
+        out = []
+        for idx, r in enumerate(rows, 1):
+            uname = f"@{r['admin_username']}" if r['admin_username'] else "Неизвестно"
+            out.append(f"{idx}. {uname} — {r['cnt']}")
+        return "\n".join(out)
+
+    text = (
+        "📊 <b>Статистика работы администрации (взятые ПЗ):</b>\n\n"
+        "📅 <b>За сегодня:</b>\n"
+        f"{format_rows(today_rows)}\n\n"
+        "📈 <b>За неделю (7 дней):</b>\n"
+        f"{format_rows(week_rows)}\n\n"
+        "🗓 <b>За месяц (30 дней):</b>\n"
+        f"{format_rows(month_rows)}\n\n"
+        "🏆 <b>За всё время:</b>\n"
+        f"{format_rows(all_rows)}"
+    )
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+@dp.message(F.text.in_({"/check", ".чек"}))
+@dp.message(Command("check"))
+async def check_cmd(message: types.Message, command: CommandObject = None):
+    if not await is_admin(message.from_user.id): return
+    
+    target_id = None
+    if command and command.args:
+        async with db_pool.acquire() as conn:
+            target_id = await get_target_user_id(conn, command.args)
+    elif message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+        
+    if not target_id:
+        await message.reply("❌ Укажите пользователя через аргумент или ответьте на его сообщение.")
+        return
+        
+    async with db_pool.acquire() as conn:
+        user_data = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1;", target_id)
+        if not user_data:
+            await message.reply("❌ Пользователь не найден в базе.")
+            return
+            
+        msg_count = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE user_id = $1;", target_id)
+
+    info = (
+        f"👤 <b>Информация о пользователе:</b>\n\n"
+        f"🆔 ID: <code>{user_data['user_id']}</code>\n"
+        f"ᴜsername: @{user_data['username'] or 'отсутствует'}\n"
+        f"🎭 Роль: {user_data['role']}\n"
+        f"🚫 Забанен: {'Да' if user_data['is_banned'] else 'Нет'}\n"
+        f"💬 Сообщений отправлено: {msg_count}"
+    )
+    await message.reply(info, parse_mode=ParseMode.HTML)
+
 @dp.message(Command("addmins"))
 async def addmins_cmd(message: types.Message, command: CommandObject):
     if not await is_owner(message.from_user.id): return
@@ -136,13 +250,6 @@ async def addmins_cmd(message: types.Message, command: CommandObject):
             return
         await conn.execute("UPDATE users SET admin_tag = $1 WHERE user_id = $2;", admin_tag, target_id)
         await message.reply(f"✅ Установлен тег <b>{admin_tag}</b> для пользователя <code>{target_id}</code>", parse_mode=ParseMode.HTML)
-
-@dp.message(Command("stats"))
-async def stats_cmd(message: types.Message):
-    if not await is_admin(message.from_user.id): return
-    async with db_pool.acquire() as conn:
-        users_count = await conn.fetchval("SELECT COUNT(*) FROM users;")
-        await message.reply(f"📊 Всего пользователей: {users_count}")
 
 # --- ОБРАБОТЧИК СООБЩЕНИЙ ИЗ АДМИН-ЧАТА (ТОПИКОВ) ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
