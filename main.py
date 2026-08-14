@@ -115,6 +115,40 @@ async def help_cmd(message: types.Message):
     )
     await message.reply(help_text, parse_mode=ParseMode.HTML)
 
+@dp.message(Command("addmins"))
+async def addmins_cmd(message: types.Message, command: CommandObject):
+    if not await is_owner(message.from_user.id): 
+        return
+    if not db_pool or not command.args:
+        await message.reply("❌ Формат: /addmins [юз/ID] [тег]\nПример: /addmins @new_admin #helper")
+        return
+    
+    args = command.args.split(maxsplit=1)
+    if len(args) < 2:
+        await message.reply("❌ Нужно указать пользователя и тег. Пример: /addmins @user #тег")
+        return
+    
+    target_arg, admin_tag = args[0], args[1].strip()
+    if not admin_tag.startswith("#"):
+        admin_tag = f"#{admin_tag}"
+
+    async with db_pool.acquire() as conn:
+        target_id = await get_target_user_id(conn, target_arg)
+        if not target_id:
+            await message.reply("❌ Пользователь не найден в базе (он должен хотя бы раз написать в бот или /start).")
+            return
+            
+        await conn.execute(
+            "UPDATE users SET role = 'admin', admin_tag = $1 WHERE user_id = $2;", 
+            admin_tag, target_id
+        )
+        
+        await message.reply(
+            f"✅ Пользователь <code>{target_id}</code> успешно назначен <b>администратором</b>!\n"
+            f"🏷 Установлен тег: <b>{admin_tag}</b>", 
+            parse_mode=ParseMode.HTML
+        )
+
 @dp.message(Command("stats"))
 async def stats_cmd(message: types.Message):
     if not await is_admin(message.from_user.id): return
@@ -229,27 +263,6 @@ async def check_cmd(message: types.Message, command: CommandObject = None):
         f"💬 Сообщений отправлено: {msg_count}"
     )
     await message.reply(info, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("addmins"))
-async def addmins_cmd(message: types.Message, command: CommandObject):
-    if not await is_owner(message.from_user.id): return
-    if not db_pool or not command.args:
-        await message.reply("❌ Формат: /addmins [юз/ID] [тег]")
-        return
-    
-    args = command.args.split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply("❌ Нужно указать пользователя и тег. Пример: /addmins @user #тег")
-        return
-    
-    target_arg, admin_tag = args[0], args[1].strip()
-    async with db_pool.acquire() as conn:
-        target_id = await get_target_user_id(conn, target_arg)
-        if not target_id:
-            await message.reply("❌ Пользователь не найден.")
-            return
-        await conn.execute("UPDATE users SET admin_tag = $1 WHERE user_id = $2;", admin_tag, target_id)
-        await message.reply(f"✅ Установлен тег <b>{admin_tag}</b> для пользователя <code>{target_id}</code>", parse_mode=ParseMode.HTML)
 
 # --- ОБРАБОТЧИК СООБЩЕНИЙ ИЗ АДМИН-ЧАТА (ТОПИКОВ) ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
