@@ -32,7 +32,6 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as conn:
-            # 1. Создаем таблицу, если ее нет
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY, 
@@ -46,11 +45,10 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS admin_actions (id SERIAL PRIMARY KEY, admin_id BIGINT, admin_username TEXT, target_user_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
             """)
             
-            # 2. Безопасно добавляем колонку admin_tag, если её ещё нет в существующей таблице
             try:
                 await conn.execute("ALTER TABLE users ADD COLUMN admin_tag TEXT;")
             except asyncpg.exceptions.DuplicateColumnError:
-                pass # Колонка уже существует, всё в порядке
+                pass
                 
     except Exception as e:
         logger.error(f"Ошибка БД: {e}")
@@ -87,7 +85,10 @@ async def start_cmd(message: types.Message):
     role = "owner" if message.from_user.id == OWNER_ID else "user"
     if db_pool:
         async with db_pool.acquire() as conn:
-            await conn.execute("INSERT INTO users (user_id, username, role) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username;", message.from_user.id, message.from_user.username, role)
+            await conn.execute(
+                "INSERT INTO users (user_id, username, role) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username;", 
+                message.from_user.id, message.from_user.username, role
+            )
     await message.reply("Привет! Пиши запрос в бот, и админ тебе ответит.")
 
 @dp.message(Command("addmins"))
@@ -118,7 +119,7 @@ async def stats_cmd(message: types.Message):
         users_count = await conn.fetchval("SELECT COUNT(*) FROM users;")
         await message.reply(f"📊 Всего пользователей: {users_count}")
 
-# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
+# --- ОБРАБОТЧИК СООБЩЕНИЙ ИЗ АДМИН-ЧАТА (ТОПИКОВ) ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def reply_from_topic(message: types.Message):
     if not message.message_thread_id or (message.text and message.text.startswith("/")): return
@@ -133,12 +134,54 @@ async def reply_from_topic(message: types.Message):
             try:
                 await bot.send_message(user_id, text, parse_mode=ParseMode.HTML)
             except Exception as e:
-                logger.error(f"Ошибка: {e}")
+                logger.error(f"Ошибка отправки пользователю: {e}")
 
+# --- ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ ОТ ПОЛЬЗОВАТЕЛЕЙ ---
 @dp.message(F.chat.type == "private")
 async def private_msg(message: types.Message):
-    # Здесь ваша логика личных сообщений (пересылка в чат администраторов)
-    pass
+    if message.text and message.text.startswith("/"):
+        return
+        
+    user_id = message.from_user.id
+    if not db_pool:
+        return
+
+    async with db_pool.acquire() as conn:
+        # Проверяем, забанен ли пользователь
+        is_banned = await conn.fetchval("SELECT is_banned FROM users WHERE user_id = $1;", user_id)
+        if is_banned:
+            return
+
+        # Получаем или создаем топик для пользователя
+        topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
+        
+        if not topic_id and ADMIN_CHAT_ID:
+            try:
+                # Создаем форум-топик для нового пользователя
+                username_str = f"@{message.from_user.username}" if message.from_user.username else f"ID: {user_id}"
+                forum_topic = await bot.create_forum_topic(chat_id=ADMIN_CHAT_ID, name=f"{message.from_user.first_name} ({username_str})")
+                topic_id = forum_topic.message_thread_id
+                
+                await conn.execute("UPDATE users SET topic_id = $1 WHERE user_id = $2;", topic_id, user_id)
+            except Exception as e:
+                logger.error(f"Не удалось создать топик: {e}")
+                topic_id = UNASSIGNED_TOPIC_ID
+
+        # Пересылаем сообщение в соответствующий топик администраторов
+        if ADMIN_CHAT_ID and topic_id:
+            try:
+                forwarded = await bot.forward_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    from_chat_id=user_id,
+                    message_id=message.message_id,
+                    message_thread_id=topic_id
+                )
+                await conn.execute(
+                    "INSERT INTO messages (user_id, sender_type, user_msg_id, admin_msg_id) VALUES ($1, 'user', $2, $3);",
+                    user_id, message.message_id, forwarded.message_id
+                )
+            except Exception as e:
+                logger.error(f"Ошибка пересылки сообщения в админ-чат: {e}")
 
 async def main():
     await init_db()
