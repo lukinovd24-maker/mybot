@@ -24,9 +24,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
 
-class ChangeAdminState(StatesGroup):
-    waiting_for_reason = State()
-
 # --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ---
 async def init_db():
     global db_pool
@@ -35,7 +32,7 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as conn:
-            # Создаем таблицу с колонкой admin_tag
+            # 1. Создаем таблицу, если ее нет
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY, 
@@ -43,12 +40,18 @@ async def init_db():
                     role TEXT DEFAULT 'user', 
                     is_banned BOOLEAN DEFAULT FALSE, 
                     topic_id INT, 
-                    rest_until TIMESTAMP, 
-                    admin_tag TEXT
+                    rest_until TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, user_id BIGINT, sender_type TEXT, user_msg_id INT, admin_msg_id INT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS admin_actions (id SERIAL PRIMARY KEY, admin_id BIGINT, admin_username TEXT, target_user_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
             """)
+            
+            # 2. Безопасно добавляем колонку admin_tag, если её ещё нет в существующей таблице
+            try:
+                await conn.execute("ALTER TABLE users ADD COLUMN admin_tag TEXT;")
+            except asyncpg.exceptions.DuplicateColumnError:
+                pass # Колонка уже существует, всё в порядке
+                
     except Exception as e:
         logger.error(f"Ошибка БД: {e}")
 
@@ -66,9 +69,6 @@ async def get_user_role(user_id: int) -> str:
 
 async def is_admin(user_id: int) -> bool:
     return (await get_user_role(user_id)) in ["owner", "director", "admin", "intern"]
-
-async def is_director_or_owner(user_id: int) -> bool:
-    return (await get_user_role(user_id)) in ["owner", "director"]
 
 async def is_owner(user_id: int) -> bool:
     return user_id == OWNER_ID or (await get_user_role(user_id)) == "owner"
@@ -99,7 +99,7 @@ async def addmins_cmd(message: types.Message, command: CommandObject):
     
     args = command.args.split(maxsplit=1)
     if len(args) < 2:
-        await message.reply("❌ Нужно указать пользователя и тег. Пример: /addmins @user #псевдо")
+        await message.reply("❌ Нужно указать пользователя и тег. Пример: /addmins @user #тег")
         return
     
     target_arg, admin_tag = args[0], args[1].strip()
@@ -137,7 +137,7 @@ async def reply_from_topic(message: types.Message):
 
 @dp.message(F.chat.type == "private")
 async def private_msg(message: types.Message):
-    # Логика пересылки как в твоем прошлом коде...
+    # Здесь ваша логика личных сообщений (пересылка в чат администраторов)
     pass
 
 async def main():
