@@ -45,6 +45,7 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS admin_actions (id SERIAL PRIMARY KEY, admin_id BIGINT, admin_username TEXT, target_user_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
             """)
             
+            # Безопасное добавление колонки admin_tag, если её еще нет
             try:
                 await conn.execute("ALTER TABLE users ADD COLUMN admin_tag TEXT;")
             except asyncpg.exceptions.DuplicateColumnError:
@@ -90,6 +91,30 @@ async def start_cmd(message: types.Message):
                 message.from_user.id, message.from_user.username, role
             )
     await message.reply("Привет! Пиши запрос в бот, и админ тебе ответит.")
+
+@dp.message(Command("help", "хелп"))
+async def help_cmd(message: types.Message):
+    if not await is_admin(message.from_user.id) and not await is_owner(message.from_user.id):
+        return
+
+    help_text = (
+        "📌 <b>Список доступных команд:</b>\n\n"
+        "👑 <b>Владелец:</b>\n"
+        "├ /stats — Статистика бота\n"
+        "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
+        "├ /check или .чек — Проверить пользователя\n"
+        "├ /ban /unban [ID] — Управление банами\n"
+        "├ /broadcast [текст] — Рассылка\n"
+        "├ /rest [юз/ID] [дни] — Отправить в отпуск\n"
+        "├ /addmins [юз/ID] [тег] — Установить админ-тег\n"
+        "├ .ид юз — Узнать ID пользователя\n"
+        "├ /setdirector [ID] — Назначить директора\n"
+        "├ /setadmin [ID] — Назначить администратора\n"
+        "├ /setintern [ID] — Назначить стажёра\n"
+        "├ /demote [ID] — Понизить до пользователя\n"
+        "└ /setowner — Подтвердить права Владельца"
+    )
+    await message.reply(help_text, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("addmins"))
 async def addmins_cmd(message: types.Message, command: CommandObject):
@@ -147,17 +172,14 @@ async def private_msg(message: types.Message):
         return
 
     async with db_pool.acquire() as conn:
-        # Проверяем, забанен ли пользователь
         is_banned = await conn.fetchval("SELECT is_banned FROM users WHERE user_id = $1;", user_id)
         if is_banned:
             return
 
-        # Получаем или создаем топик для пользователя
         topic_id = await conn.fetchval("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
         
         if not topic_id and ADMIN_CHAT_ID:
             try:
-                # Создаем форум-топик для нового пользователя
                 username_str = f"@{message.from_user.username}" if message.from_user.username else f"ID: {user_id}"
                 forum_topic = await bot.create_forum_topic(chat_id=ADMIN_CHAT_ID, name=f"{message.from_user.first_name} ({username_str})")
                 topic_id = forum_topic.message_thread_id
@@ -167,7 +189,6 @@ async def private_msg(message: types.Message):
                 logger.error(f"Не удалось создать топик: {e}")
                 topic_id = UNASSIGNED_TOPIC_ID
 
-        # Пересылаем сообщение в соответствующий топик администраторов
         if ADMIN_CHAT_ID and topic_id:
             try:
                 forwarded = await bot.forward_message(
