@@ -89,6 +89,22 @@ async def get_target_user_id(conn, arg: str) -> int:
     return row["user_id"] if row else None
 
 
+# --- КОМАНДА /start ---
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    if message.chat.type != "private":
+        return
+        
+    welcome_text = (
+        "приветствую путник ты попал в прекрасный бот под названием <b>\"вечернее сияние\"</b>.\n\n"
+        "перед тем как начать общение, прошу заглянуть в наш тгк: https://t.me/eve_ning_glow\n"
+        "там вся важная информация.\n\n"
+        "Прочитал? тогда пиши <b>\"привет общение/поддержка/уни\"</b> и к тебе придет админ.\n\n"
+        "удачи тебе солнышко ✨"
+    )
+    await message.reply(welcome_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
 # --- КОМАНДА /help ---
 @dp.message(Command("help", "хелп"))
 async def help_cmd(message: types.Message):
@@ -433,6 +449,10 @@ async def broadcast_execute(message: types.Message, state: FSMContext):
 # --- ОБРАБОТКА ЛИЧНЫХ СООБЩЕНИЙ ПОЛЬЗОВАТЕЛЕЙ И ТОПИКОВ ---
 @dp.message(F.chat.type == "private")
 async def private_msg(message: types.Message):
+    # Команды (кроме тех, что уходят в топики) пропускаем
+    if message.text and message.text.startswith("/"):
+        return
+
     user_id = message.from_user.id
     
     async with db_pool.acquire() as conn:
@@ -483,10 +503,7 @@ async def private_msg(message: types.Message):
                 logger.error(f"Ошибка при создании топика для нового юзера: {e}")
                 return
 
-        if message.text and message.text.startswith("/"):
-            return
-
-        if topic_id and message.text and not message.text.startswith("/"):
+        if topic_id:
             try:
                 forwarded = await bot.forward_message(
                     chat_id=ADMIN_CHAT_ID,
