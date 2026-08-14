@@ -40,7 +40,7 @@ async def init_db():
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as conn:
             await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, username TEXT, role TEXT DEFAULT 'user', is_banned BOOLEAN DEFAULT FALSE, topic_id INT, rest_until TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, username TEXT, role TEXT DEFAULT 'user', is_banned BOOLEAN DEFAULT FALSE, topic_id INT, rest_until TIMESTAMP, admin_tag TEXT);
                 CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, user_id BIGINT, sender_type TEXT, user_msg_id INT, admin_msg_id INT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS admin_actions (id SERIAL PRIMARY KEY, admin_id BIGINT, admin_username TEXT, target_user_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
             """)
@@ -118,6 +118,7 @@ async def help_cmd(message: types.Message):
         "├ /ban /unban [ID] — Управление банами\n"
         "├ /broadcast [текст] — Рассылка\n"
         "├ /rest [юз/ID] [дни] — Отправить в отпуск\n"
+        "├ /addmins [юз/ID] [тег] — Установить админ-тег\n"
         "├ .ид юз — Узнать ID пользователя\n"
         "├ /setdirector [ID] — Назначить директора\n"
         "├ /setadmin [ID] — Назначить администратора\n"
@@ -286,6 +287,7 @@ async def check_cmd(message: types.Message, command: CommandObject):
         f"🆔 ID: <code>{user['user_id']}</code>\n"
         f"👤 Юзернейм: @{user['username'] or 'отсутствует'}\n"
         f"🛡 Роль: <b>{user['role']}</b>\n"
+        f"🏷 Админ-тег: <b>{user['admin_tag'] or 'Не установлен'}</b>\n"
         f"🚫 Забанен: <b>{'Да' if user['is_banned'] else 'Нет'}</b>\n"
         f"🌴 Отпуск до: {user['rest_until'] or 'Нет'}"
     )
@@ -369,6 +371,31 @@ async def rest_cmd(message: types.Message, command: CommandObject):
             return
         await conn.execute("UPDATE users SET rest_until = $1 WHERE user_id = $2;", rest_until, target_id)
         await message.reply(f"🌴 Администратор <code>{target_id}</code> отправлен в отпуск на {days} дн.", parse_mode=ParseMode.HTML)
+
+# --- КОМАНДА /ADDMINS (Установка универсального тега админа) ---
+@dp.message(Command("addmins"))
+async def addmins_cmd(message: types.Message, command: CommandObject):
+    if not await is_owner(message.from_user.id):
+        return
+    if not db_pool or not command.args:
+        await message.reply("❌ Формат: /addmins [юз/ID] [тег]")
+        return
+    
+    args = command.args.split(maxsplit=1)
+    if len(args) < 2:
+        await message.reply("❌ Укажите тег администратора. Формат: /addmins [юз/ID] [тег]")
+        return
+    
+    target_arg, admin_tag = args[0], args[1].strip()
+
+    async with db_pool.acquire() as conn:
+        target_id = await get_target_user_id(conn, target_arg)
+        if not target_id:
+            await message.reply("❌ Пользователь не найден в базе данных.")
+            return
+        
+        await conn.execute("UPDATE users SET admin_tag = $1 WHERE user_id = $2;", admin_tag, target_id)
+        await message.reply(f"🏷 Администратору <code>{target_id}</code> успешно установлен тег: <b>{admin_tag}</b>", parse_mode=ParseMode.HTML)
 
 @dp.message(F.text.startswith(".ид"), F.chat.id == ADMIN_CHAT_ID)
 async def get_id_dot_cmd(message: types.Message):
@@ -648,12 +675,19 @@ async def take_user_callback(callback: types.CallbackQuery):
     target_user_id = int(callback.data.split("_")[2])
     admin_user = callback.from_user
     admin_username = admin_user.username or "отсутствует"
-    admin_name = f"@{admin_username}" if admin_username != "отсутствует" else admin_user.full_name
-    admin_info = f"{admin_name} (ID: <code>{admin_user.id}</code>)"
 
     if db_pool:
         async with db_pool.acquire() as conn:
-            await conn.execute("INSERT INTO admin_actions (admin_id, admin_username, target_user_id) VALUES ($1, $2, $3);", admin_user.id, admin_username, target_user_id)
+            # Получаем универсальный тег админа из базы
+            admin_tag = await conn.fetchval("SELECT admin_tag FROM users WHERE user_id = $1;", admin_user.id)
+            
+            # Если тег не установлен, используем юзернейм или имя по умолчанию
+            if not admin_tag:
+                admin_tag = f"@{admin_username}" if admin_username != "отсутствует" else admin_user.full_name
+
+            await conn.execute("INSERT INTO admin_actions (admin_id, admin_username, target_user_id) VALUES ($1, $2, $3);", admin_user.id, admin_tag, target_user_id)
+
+    admin_info = f"<b>{admin_tag}</b> (ID: <code>{admin_user.id}</code>)"
 
     original_text = callback.message.html_text
     
@@ -678,7 +712,7 @@ async def take_user_callback(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка кнопки взять ПЗ: {e}")
 
-# --- ОТВЕТЫ ИЗ ТОПИКОВ АДМИНАМИ ---
+# --- ОТВЕТЫ ИЗ ТОПИКОВ АДМИНАМИ (С подписью тегом) ---
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def reply_from_topic(message: types.Message):
     if message.forum_topic_created or message.forum_topic_edited:
@@ -688,11 +722,29 @@ async def reply_from_topic(message: types.Message):
     if not db_pool:
         return
 
+    admin_id = message.from_user.id
+
     async with db_pool.acquire() as conn:
         user_id = await conn.fetchval("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
         if user_id:
             try:
-                sent_msg = await bot.copy_message(chat_id=user_id, from_chat_id=ADMIN_CHAT_ID, message_id=message.message_id)
+                # Получаем универсальный тег админа
+                admin_tag = await conn.fetchval("SELECT admin_tag FROM users WHERE user_id = $1;", admin_id)
+                if not admin_tag:
+                    admin_tag = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
+
+                # Если сообщение текстовое, добавляем префикс с тегом
+                if message.text:
+                    formatted_text = f"<b>[{admin_tag}]</b> {message.text}"
+                    sent_msg = await bot.send_message(chat_id=user_id, text=formatted_text, parse_mode=ParseMode.HTML)
+                elif message.caption:
+                    formatted_caption = f"<b>[{admin_tag}]</b> {message.caption}"
+                    # Если это медиа с подписью
+                    message.caption = formatted_caption
+                    sent_msg = await bot.copy_message(chat_id=user_id, from_chat_id=ADMIN_CHAT_ID, message_id=message.message_id)
+                else:
+                    sent_msg = await bot.copy_message(chat_id=user_id, from_chat_id=ADMIN_CHAT_ID, message_id=message.message_id)
+
                 await conn.execute(
                     "INSERT INTO messages (user_id, sender_type, user_msg_id, admin_msg_id) VALUES ($1, 'admin', $2, $3);",
                     user_id, sent_msg.message_id, message.message_id
