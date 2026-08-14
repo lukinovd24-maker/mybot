@@ -78,6 +78,34 @@ async def get_target_user_id(conn, arg: str) -> int:
     row = await conn.fetchrow("SELECT user_id FROM users WHERE LOWER(username) = LOWER($1);", arg)
     return row["user_id"] if row else None
 
+
+# --- КОМАНДА /help ---
+@dp.message(Command("help", "хелп"))
+async def help_cmd(message: types.Message):
+    if not await is_admin(message.from_user.id) and not await is_owner(message.from_user.id):
+        return
+
+    help_text = (
+        "📌 <b>Список доступных команд:</b>\n\n"
+        "👑 <b>Владелец / Администрация:</b>\n"
+        "├ /stats — Статистика бота\n"
+        "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
+        "├ /adminlist (или .админы) — Список состава и тегов\n"
+        "├ /check или .чек — Проверить пользователя\n"
+        "├ /ban /unban [ID] — Управление банами\n"
+        "├ /broadcast [текст] — Рассылка\n"
+        "├ /rest [юз/ID] [дни] — Отправить в отпуск\n"
+        "├ /addmins [юз/ID] [тег] — Установить админ-тег и назначить\n"
+        "├ .ид юз — Узнать ID пользователя\n"
+        "├ /setdirector [ID] — Назначить директора\n"
+        "├ /setadmin [ID] — Назначить администратора\n"
+        "├ /setintern [ID] — Назначить стажёра\n"
+        "├ /demote [ID] — Понизить до пользователя\n"
+        "└ /setowner — Подтвердить права Владельца"
+    )
+    await message.reply(help_text, parse_mode=ParseMode.HTML)
+
+
 # --- КОМАНДА /addmins ---
 @dp.message(Command("addmins"))
 async def addmins_cmd(message: types.Message, command: CommandObject):
