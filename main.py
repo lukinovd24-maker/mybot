@@ -21,7 +21,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
 
-# --- ИНИЦИАЛИЗАЦИЯ БД ---
+# --- ИНИЦИАЛИЗАЦИЯ БД И МИГРАЦИИ ---
 async def init_db():
     global db_pool
     if not DATABASE_URL: return
@@ -30,17 +30,30 @@ async def init_db():
         async with db_pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY, username TEXT, role TEXT DEFAULT 'user', 
-                    is_banned BOOLEAN DEFAULT FALSE, topic_id INT, admin_tag TEXT, rest_until TIMESTAMP
+                    user_id BIGINT PRIMARY KEY, 
+                    username TEXT, 
+                    role TEXT DEFAULT 'user', 
+                    is_banned BOOLEAN DEFAULT FALSE, 
+                    topic_id INT, 
+                    admin_tag TEXT, 
+                    rest_until TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, user_id BIGINT, sender_type TEXT, user_msg_id INT, admin_msg_id INT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS admin_actions (id SERIAL PRIMARY KEY, admin_id BIGINT, admin_username TEXT, target_user_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
             """)
-            try: await conn.execute("ALTER TABLE users ADD COLUMN admin_tag TEXT;")
-            except: pass
-            try: await conn.execute("ALTER TABLE users ADD COLUMN rest_until TIMESTAMP;")
-            except: pass
-    except Exception as e: logger.error(f"Ошибка БД: {e}")
+            # Безопасные миграции колонок на случай старых баз
+            for col, col_type in [
+                ("admin_tag", "TEXT"), 
+                ("rest_until", "TIMESTAMP"), 
+                ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            ]:
+                try:
+                    await conn.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type};")
+                except asyncpg.exceptions.DuplicateColumnError:
+                    pass
+    except Exception as e: 
+        logger.error(f"Ошибка БД: {e}")
 
 async def get_user_role(user_id: int) -> str:
     if user_id == OWNER_ID: return "owner"
@@ -84,6 +97,44 @@ async def addmins_cmd(message: types.Message, command: CommandObject):
             return
         await conn.execute("UPDATE users SET role = 'admin', admin_tag = $1 WHERE user_id = $2;", admin_tag, target_id)
         await message.reply(f"✅ Пользователь <code>{target_id}</code> теперь админ с тегом <b>{admin_tag}</b>", parse_mode=ParseMode.HTML)
+
+# --- СПИСОК АДМИНИСТРАТОРОВ (/adminlist /admins .админы) ---
+@dp.message(F.text.in_({"/adminlist", "/admins", ".админы"}))
+@dp.message(Command("adminlist", "admins"))
+async def adminlist_cmd(message: types.Message):
+    if not await is_admin(message.from_user.id): 
+        return
+    
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT username, user_id, role, admin_tag, 
+                   EXTRACT(DAY FROM (NOW() - created_at))::INT as days_in_base
+            FROM users 
+            WHERE role IN ('owner', 'director', 'admin', 'intern') OR admin_tag IS NOT NULL
+            ORDER BY 
+                CASE role 
+                    WHEN 'owner' THEN 1 
+                    WHEN 'director' THEN 2 
+                    WHEN 'admin' THEN 3 
+                    WHEN 'intern' THEN 4 
+                    ELSE 5 
+                END;
+        """)
+        
+    if not rows:
+        await message.reply("❌ В базе данных пока нет администраторов.")
+        return
+
+    text_lines = ["🛡 <b>Список состава администрации:</b>\n"]
+    for r in rows:
+        uname = f"@{r['username']}" if r['username'] else f"ID: <code>{r['user_id']}</code>"
+        tag = r['admin_tag'] if r['admin_tag'] else "без тега"
+        days = r['days_in_base'] if r['days_in_base'] is not None else 0
+        role = r['role'].upper()
+        
+        text_lines.append(f"• {uname} — <b>{tag}</b> — [{role}] — <b>{days} дн.</b> в базе")
+
+    await message.reply("\n".join(text_lines), parse_mode=ParseMode.HTML)
 
 # --- СТАТИСТИКА БОТА (/stats) ---
 @dp.message(Command("stats"))
@@ -168,7 +219,7 @@ async def adminstats_cmd(message: types.Message):
     )
     await message.reply(text, parse_mode=ParseMode.HTML)
 
-# --- ОБРАБОТКА СТАРТА И СООБЩЕНИЙ В ЛИЧКЕ ---
+# --- ОБРАБОТКА ЛИЧНЫХ СООБЩЕНИЙ ПОЛЬЗОВАТЕЛЕЙ ---
 @dp.message(F.chat.type == "private")
 async def private_msg(message: types.Message):
     user_id = message.from_user.id
