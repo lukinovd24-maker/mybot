@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import asyncpg
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -16,13 +17,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- НАСТРОЙКИ ---
-BOT_TOKEN = "8641353697:AAGaWup_XK0YobyxpDTydxhEx5vsm_hBevc"
-ADMIN_CHAT_ID = -1001234567890  # ID твоей админ-группы (форума)
-UNASSIGNED_TOPIC_ID = 765       # ID топика «Неразобранные»
-DB_DSN = "postgresql://user:password@localhost:5432/dbname"  # Твои данные БД
+# --- НАСТРОЙКИ (автоматически берутся из переменных окружения Railway) ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # ID твоей админ-группы (форума)
+UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))  # ID топика «Неразобранные»
+DB_DSN = os.getenv("DATABASE_URL")  # Автоматическая ссылка на базу PostgreSQL от Railway
 
-# ID владельца бота (установлен твой ID)
+# ID владельца бота
 OWNER_ID = 8674242517 
 
 bot = Bot(token=BOT_TOKEN)
@@ -282,7 +283,7 @@ async def private_msg(message: types.Message):
                     parse_mode=ParseMode.HTML
                 )
 
-                # Карточка в неразобранные (ID 765) с кнопкой
+                # Карточка в неразобранные с кнопкой
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🟢 Взять обращение", callback_data=f"take_pz_{user_id}")]
                 ])
