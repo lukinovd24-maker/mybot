@@ -17,13 +17,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+BOT_TOKEN = "8641353697:AAGaWup_XK0YobyxpDTydxhEx5vsm_hBevc"
 ADMIN_CHAT_ID = -1001234567890  # ID твоей админ-группы (форума)
 UNASSIGNED_TOPIC_ID = 765       # ID топика «Неразобранные»
 DB_DSN = "postgresql://user:password@localhost:5432/dbname"  # Твои данные БД
 
-# ID владельца бота
-OWNER_ID = 123456789 
+# ID владельца бота (установлен твой ID)
+OWNER_ID = 8674242517 
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
