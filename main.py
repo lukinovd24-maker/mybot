@@ -6,7 +6,6 @@ from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # Настройки логирования
@@ -30,8 +29,6 @@ db_pool: asyncpg.Pool = None
 # Состояния для постинга
 class PostState(StatesGroup):
     waiting_for_post = State()
-    waiting_for_edit_id = State()
-    waiting_for_new_text = State()
 
 # --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
 async def init_db():
@@ -74,6 +71,42 @@ async def get_admin_role(user_id: int) -> str:
         row = await conn.fetchrow("SELECT role FROM admins WHERE user_id = $1;", user_id)
         return row["role"] if row else None
 
+# --- СПРАВКА ПО КОМАНДАМ ---
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    if message.chat.type == "private":
+        return await message.answer("ℹ️ Это бот технической поддержки. Напишите ваше сообщение, и оно автоматически создаст обращение для администраторов.")
+    
+    caller_id = message.from_user.id
+    role = await get_admin_role(caller_id)
+    
+    if not role:
+        return await message.answer("❌ У вас нет доступа к командам администратора.")
+
+    help_text = (
+        "📌 <b>Список доступных команд:</b>\n\n"
+        "👑 <b>Администрация:</b>\n"
+        "├ /stats — Статистика бота\n"
+        "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
+        "├ /adminlist (или .админы) — Список состава и дней\n"
+        "├ /check или .чек — Проверить пользователя\n"
+        "├ /broadcast — Меню рассылки\n"
+        "├ /addmins [юз/ID] [тег] — Установить админ-тег\n"
+        "├ /id или .ид — Узнать ID пользователя\n"
+        "├ /setdirector [юз/ID] — Назначить директора\n"
+        "├ /setadmin [юз/ID] — Назначить администратора\n"
+        "├ /setintern [юз/ID] — Назначить стажёра\n"
+        "└ /demote [юз/ID] — Понизить до пользователя"
+    )
+
+    if caller_id == OWNER_ID:
+        help_text += (
+            "\n\n🛠 <b>Владелец:</b>\n"
+            "└ /post — Опубликовать пост в канал"
+        )
+
+    await message.answer(help_text, parse_mode=ParseMode.HTML)
+
 # --- КОМАНДЫ ПОСТИНГА (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА) ---
 @dp.message(Command("post"))
 async def cmd_post(message: types.Message, state: FSMContext):
@@ -85,8 +118,7 @@ async def cmd_post(message: types.Message, state: FSMContext):
 
 @dp.message(PostState.waiting_for_post)
 async def process_post(message: types.Message, state: FSMContext):
-    # Здесь можно указать ID твоего канала или username (например, "@my_channel")
-    CHANNEL_ID = "@my_channel" 
+    CHANNEL_ID = "@my_channel" # Укажи свой канал
     
     try:
         sent_msg = await message.send_copy(chat_id=CHANNEL_ID)
@@ -95,13 +127,13 @@ async def process_post(message: types.Message, state: FSMContext):
                 "INSERT INTO channel_posts (message_id, channel_id, text) VALUES ($1, $2, $3);",
                 sent_msg.message_id, sent_msg.chat.id, message.html_text or message.text
             )
-        await message.answer(f"✅ Пост успешно опубликован в канал! ID поста в базе: {sent_msg.message_id}")
+        await message.answer(f"✅ Пост успешно опубликован в канал! ID: {sent_msg.message_id}")
     except Exception as e:
         await message.answer(f"❌ Ошибка при публикации: {e}")
     finally:
         await state.clear()
 
-# --- УПРАВЛЕНИЕ РОДЯМИ АДМИНИСТРАЦИИ ---
+# --- УПРАВЛЕНИЕ РОЛЯМИ АДМИНИСТРАЦИИ ---
 @dp.message(Command(commands=["setdirector", "setadmin", "setintern", "demote"]))
 async def set_role_command(message: types.Message):
     caller_id = message.from_user.id
@@ -124,7 +156,7 @@ async def set_role_command(message: types.Message):
     if command == "demote":
         async with db_pool.acquire() as conn:
             await conn.execute("DELETE FROM admins WHERE user_id = $1;", target_id)
-        return await message.answer(f"✅ Пользователь <code>{target_id}</code> разжалован.", parse_mode=ParseMode.HTML)
+        return await message.answer(f"✅ Пользователь <code>{target_id}</code> понижен до пользователя.", parse_mode=ParseMode.HTML)
 
     role_map = {
         "setdirector": "director",
@@ -148,7 +180,7 @@ async def cmd_stats(message: types.Message):
         count = await conn.fetchval("SELECT COUNT(*) FROM admin_actions WHERE admin_id = $1;", message.from_user.id)
     await message.answer(f"📊 Ваша статистика: вы взяли в работу обращений: <b>{count}</b>", parse_mode=ParseMode.HTML)
 
-@dp.message(Command("adminstats"))
+@dp.message(Command(commands=["adminstats", "астат"]))
 async def cmd_admin_stats(message: types.Message):
     caller_role = await get_admin_role(message.from_user.id)
     if caller_role not in ['owner', 'director']:
@@ -183,14 +215,12 @@ async def private_msg(message: types.Message):
         if user_row and user_row["topic_id"]:
             topic_id = user_row["topic_id"]
         else:
-            # Создаем новый топик в форум-чате для пользователя
             forum_topic = await bot.create_forum_topic(
                 chat_id=ADMIN_CHAT_ID,
                 name=f"{first_name} | {user_id}"
             )
             topic_id = forum_topic.message_thread_id
 
-            # Сохраняем в базу данных
             await conn.execute("""
                 INSERT INTO users (user_id, username, first_name, topic_id) 
                 VALUES ($1, $2, $3, $4)
@@ -229,14 +259,12 @@ async def private_msg(message: types.Message):
                 parse_mode=ParseMode.HTML
             )
 
-    # Пересылаем сообщение пользователя в его персональный топик
     await message.send_copy(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id)
 
 # --- КНОПКА ВЗЯТИЯ ПЗ ---
 @dp.callback_query(F.data.startswith("take_pz_"))
 async def take_pz(callback: types.CallbackQuery):
     target_id = int(callback.data.split("_")[2])
-    admin_name = callback.from_user.username or callback.from_user.first_name
     admin_mention = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.first_name
     
     async with db_pool.acquire() as conn:
@@ -253,7 +281,6 @@ async def take_pz(callback: types.CallbackQuery):
     user_topic_id = user_row["topic_id"]
     username_str = f"@{user_row['username']}" if user_row['username'] else f"ID: {target_id}"
 
-    # Ссылка на топик вида t.me/c/chat_id/topic_id
     chat_id_str = str(ADMIN_CHAT_ID)
     clean_chat_id = chat_id_str[4:] if chat_id_str.startswith("-100") else chat_id_str.lstrip("-")
     topic_link = f"https://t.me/c/{clean_chat_id}/{user_topic_id}"
