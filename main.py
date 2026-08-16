@@ -563,3 +563,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен вручную.")
+@dp.message(F.photo, F.from_user.id == OWNER_ID)
+async def get_photo_id(message: types.Message):
+    photo = message.photo[-1]
+    await message.answer(f"📸 <b>file_id этой фотографии:</b>\n\n<code>{photo.file_id}</code>", parse_mode=ParseMode.HTML)
