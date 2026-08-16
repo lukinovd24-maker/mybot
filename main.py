@@ -19,11 +19,10 @@ logger = logging.getLogger(__name__)
 
 # --- НАСТРОЙКИ (автоматически берутся из переменных окружения Railway) ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))  # ID твоей админ-группы (форума)
-UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))  # ID топика «Неразобранные»
-DB_DSN = os.getenv("DATABASE_URL")  # Автоматическая ссылка на базу PostgreSQL от Railway
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))
+DB_DSN = os.getenv("DATABASE_URL")
 
-# ID владельца бота
 OWNER_ID = 8674242517 
 
 bot = Bot(token=BOT_TOKEN)
@@ -31,7 +30,6 @@ dp = Dispatcher()
 
 db_pool: asyncpg.Pool = None
 
-# Состояния для постинга
 class PostState(StatesGroup):
     waiting_for_post = State()
 
@@ -72,7 +70,6 @@ async def init_db():
         logger.critical(f"Ошибка при инициализации базы данных: {e}")
         raise
 
-# --- УТИЛИТА ПРОВЕРКИ РОЛЕЙ ---
 async def get_admin_role(user_id: int) -> str:
     if user_id == OWNER_ID:
         return 'owner'
@@ -83,6 +80,22 @@ async def get_admin_role(user_id: int) -> str:
     except Exception as e:
         logger.error(f"Ошибка проверки роли для {user_id}: {e}")
         return None
+
+# --- ПРИВЕТСТВЕННОЕ СООБЩЕНИЕ (/start) ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    if message.chat.type != "private":
+        return
+    
+    await message.answer(
+        "приветствую путник ты попал в прекрасный бот под названием \"вечернее сияние\".\n"
+        "перед тем как начать общение, прошу заглянуть в наш тгк: https://t.me/eve_ning_glow\n"
+        "там вся важная информация.\n\n"
+        "Прочитал? тогда пиши \"привет общение/поддержка/уни\" и к тебе придет админ.\n"
+        "удачи тебе солнышко",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
 
 # --- СПРАВКА ПО КОМАНДАМ ---
 @dp.message(F.text.in_({"/help", ".help", "/хелп", ".хелп"}))
@@ -123,7 +136,7 @@ async def cmd_help(message: types.Message):
     except Exception as e:
         logger.error(f"Ошибка в команде help: {e}")
 
-# --- КОМАНДЫ ПОСТИНГА (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА) ---
+# --- КОМАНДЫ ПОСТИНГА ---
 @dp.message(Command("post"))
 async def cmd_post(message: types.Message, state: FSMContext):
     if message.from_user.id != OWNER_ID:
@@ -137,8 +150,7 @@ async def cmd_post(message: types.Message, state: FSMContext):
 
 @dp.message(PostState.waiting_for_post)
 async def process_post(message: types.Message, state: FSMContext):
-    CHANNEL_ID = "@my_channel"  # Замени на ID или юзернейм канала
-    
+    CHANNEL_ID = "@my_channel"
     try:
         sent_msg = await message.send_copy(chat_id=CHANNEL_ID)
         async with db_pool.acquire() as conn:
@@ -241,65 +253,78 @@ async def cmd_admin_stats(message: types.Message):
 # --- ОБРАБОТКА ТИКЕТОВ И ОБЩЕНИЯ С ПОЛЬЗОВАТЕЛЯМИ ---
 @dp.message(F.chat.type == "private")
 async def private_msg(message: types.Message):
+    if message.text and message.text.startswith("/start"):
+        return
+
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
     username_str = f"@{username}" if username else "Отсутствует"
 
     try:
+        topic_id = None
         async with db_pool.acquire() as conn:
-            user_row = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1;", user_id)
-
-            if user_row and user_row["topic_id"]:
-                topic_id = user_row["topic_id"]
-            else:
-                try:
-                    forum_topic = await bot.create_forum_topic(
-                        chat_id=ADMIN_CHAT_ID,
-                        name=f"{first_name} | {user_id}"
-                    )
-                    topic_id = forum_topic.message_thread_id
-                except TelegramAPIError as e:
-                    logger.error(f"Не удалось создать форум-топик для пользователя {user_id}: {e}")
-                    return await message.answer("❌ Произошла ошибка при создании обращения. Попробуйте позже.")
-
-                await conn.execute("""
-                    INSERT INTO users (user_id, username, first_name, topic_id) 
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (user_id) DO UPDATE SET topic_id = $4, username = $2, first_name = $3;
-                """, user_id, username, first_name, topic_id)
-
-                # Карточка в персональный топик
-                await bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    message_thread_id=topic_id,
-                    text=(
-                        f"📋 <b>Информация о новом пользователе:</b>\n"
-                        f"├ Имя: {first_name}\n"
-                        f"├ Юзернейм: {username_str}\n"
-                        f"└ ID: <code>{user_id}</code>\n\n"
-                        f"⏳ <i>Статус: ПЗ ожидает назначения сотрудника.</i>"
-                    ),
-                    parse_mode=ParseMode.HTML
+            async with conn.transaction():
+                user_row = await conn.fetchrow(
+                    "SELECT topic_id FROM users WHERE user_id = $1 FOR UPDATE;", user_id
                 )
 
-                # Карточка в неразобранные с кнопкой
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🟢 Взять обращение", callback_data=f"take_pz_{user_id}")]
-                ])
-                await bot.send_message(
+                if user_row and user_row["topic_id"]:
+                    topic_id = user_row["topic_id"]
+                else:
+                    await conn.execute("""
+                        INSERT INTO users (user_id, username, first_name, topic_id) 
+                        VALUES ($1, $2, $3, NULL)
+                        ON CONFLICT (user_id) DO UPDATE SET username = $2, first_name = $3;
+                    """, user_id, username, first_name)
+
+        if not topic_id:
+            try:
+                forum_topic = await bot.create_forum_topic(
                     chat_id=ADMIN_CHAT_ID,
-                    message_thread_id=UNASSIGNED_TOPIC_ID,
-                    text=(
-                        f"⚠️ <b>Новое обращение (ПЗ без администратора!)</b>\n\n"
-                        f"👤 Пользователь: {username_str}\n"
-                        f"🆔 ID: <code>{user_id}</code>\n"
-                        f"📝 Имя: {first_name}\n\n"
-                        f"<i>Ожидает сотрудника. Нажмите кнопку ниже, чтобы взять тикет в работу.</i>"
-                    ),
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.HTML
+                    name=f"{first_name} | {user_id}"
                 )
+                topic_id = forum_topic.message_thread_id
+            except TelegramAPIError as e:
+                logger.error(f"Не удалось создать форум-топик для пользователя {user_id}: {e}")
+                return await message.answer("❌ Произошла ошибка при создании обращения. Попробуйте позже.")
+
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET topic_id = $1 WHERE user_id = $2;", topic_id, user_id
+                )
+
+            # Карточка в персональный топик
+            await bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                message_thread_id=topic_id,
+                text=(
+                    f"📋 <b>Информация о новом пользователе:</b>\n"
+                    f"├ Имя: {first_name}\n"
+                    f"├ Юзернейм: {username_str}\n"
+                    f"└ ID: <code>{user_id}</code>\n\n"
+                    f"⏳ <i>Статус: ПЗ ожидает назначения сотрудника.</i>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+
+            # Карточка в неразобранные с кнопкой
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🟢 Взять обращение", callback_data=f"take_pz_{user_id}")]
+            ])
+            await bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                message_thread_id=UNASSIGNED_TOPIC_ID,
+                text=(
+                    f"⚠️ <b>Новое обращение (ПЗ без администратора!)</b>\n\n"
+                    f"👤 Пользователь: {username_str}\n"
+                    f"🆔 ID: <code>{user_id}</code>\n"
+                    f"📝 Имя: {first_name}\n\n"
+                    f"<i>Ожидает сотрудника. Нажмите кнопку ниже, чтобы взять тикет в работу.</i>"
+                ),
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
 
         await message.send_copy(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id)
     except Exception as e:
