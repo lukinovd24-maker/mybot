@@ -24,6 +24,7 @@ UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))
 DB_DSN = os.getenv("DATABASE_URL")
 
 OWNER_ID = 8674242517 
+CHANNEL_ID = "@eve_ning_glow"  # Твой реальный ТГК для постов
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -32,6 +33,9 @@ db_pool: asyncpg.Pool = None
 
 class PostState(StatesGroup):
     waiting_for_post = State()
+
+class BroadcastState(StatesGroup):
+    waiting_for_broadcast = State()
 
 # --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
 async def init_db():
@@ -49,6 +53,7 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS admins (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
+                    tag TEXT,
                     role TEXT CHECK (role IN ('owner', 'director', 'admin', 'intern'))
                 );
                 CREATE TABLE IF NOT EXISTS admin_actions (
@@ -97,7 +102,7 @@ async def cmd_start(message: types.Message):
         disable_web_page_preview=True
     )
 
-# --- СПРАВКА ПО КОМАНДАМ ---
+# --- СПРАВКА ПО КОМАНДАМ (/help) ---
 @dp.message(F.text.in_({"/help", ".help", "/хелп", ".хелп"}))
 async def cmd_help(message: types.Message):
     try:
@@ -113,11 +118,11 @@ async def cmd_help(message: types.Message):
         help_text = (
             "📌 <b>Список доступных команд:</b>\n\n"
             "👑 <b>Администрация:</b>\n"
-            "├ /stats — Статистика бота\n"
+            "├ /stats — Ваша личная статистика\n"
             "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
-            "├ /adminlist (или .админы) — Список состава и дней\n"
+            "├ /adminlist (или .админы) — Список состава\n"
             "├ /check или .чек — Проверить пользователя\n"
-            "├ /broadcast — Меню рассылки\n"
+            "├ /broadcast — Сделать рассылку пользователям\n"
             "├ /addmins [юз/ID] [тег] — Установить админ-тег\n"
             "├ /id или .ид — Узнать ID пользователя\n"
             "├ /setdirector [юз/ID] — Назначить директора\n"
@@ -136,6 +141,141 @@ async def cmd_help(message: types.Message):
     except Exception as e:
         logger.error(f"Ошибка в команде help: {e}")
 
+# --- КОМАНДА /id (или .ид) ---
+@dp.message(F.text.in_({"/id", ".ид"}))
+async def cmd_id(message: types.Message):
+    try:
+        target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
+        await message.answer(
+            f"🆔 <b>Информация о пользователе:</b>\n"
+            f"├ Имя: {target.first_name}\n"
+            f"├ Юзернейм: @{target.username if target.username else 'отсутствует'}\n"
+            f"└ ID: <code>{target.id}</code>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в команде id: {e}")
+
+# --- КОМАНДА /check (или .чек) ---
+@dp.message(F.text.in_({"/check", ".чек"}))
+async def cmd_check(message: types.Message):
+    try:
+        caller_role = await get_admin_role(message.from_user.id)
+        if not caller_role:
+            return await message.answer("❌ У вас нет прав.")
+            
+        if not message.reply_to_message:
+            return await message.answer("⚠️ Эту команду нужно использовать ответом на сообщение пользователя.")
+            
+        target = message.reply_to_message.from_user
+        async with db_pool.acquire() as conn:
+            user_data = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1;", target.id)
+            
+        has_ticket = "Да (топик создан)" if user_data and user_data["topic_id"] else "Нет активных тикетов"
+        
+        await message.answer(
+            f"🔍 <b>Проверка пользователя:</b>\n"
+            f"├ Имя: {target.first_name}\n"
+            f"├ ID: <code>{target.id}</code>\n"
+            f"├ Юзернейм: @{target.username if target.username else 'нет'}\n"
+            f"└ Активный тикет: {has_ticket}",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в check: {e}")
+
+# --- КОМАНДА /addmins (установка админ-тега) ---
+@dp.message(Command("addmins"))
+async def cmd_addmins(message: types.Message):
+    try:
+        caller_role = await get_admin_role(message.from_user.id)
+        if caller_role not in ['owner', 'director']:
+            return await message.answer("❌ Недостаточно прав.")
+            
+        args = message.text.split(maxsplit=2)
+        if len(args) < 3:
+            return await message.answer("⚠️ Использование: /addmins <user_id> <тег>")
+            
+        try:
+            target_id = int(args[1])
+        except ValueError:
+            return await message.answer("❌ Неверный ID пользователя.")
+            
+        tag = args[2]
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE admins SET tag = $1 WHERE user_id = $2;
+            """, tag, target_id)
+            
+        await message.answer(f"✅ Администратору <code>{target_id}</code> установлен тег: <b>{tag}</b>", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Ошибка addmins: {e}")
+
+# --- КОМАНДА /adminlist (или .админы) ---
+@dp.message(F.text.in_({"/adminlist", ".админы"}))
+async def cmd_adminlist(message: types.Message):
+    try:
+        caller_role = await get_admin_role(message.from_user.id)
+        if not caller_role:
+            return await message.answer("❌ Недостаточно прав.")
+            
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT user_id, username, role, tag FROM admins ORDER BY role;")
+            
+        if not rows:
+            return await message.answer("📋 Список администраторов пуст.")
+            
+        text = "📋 <b>Список состава администрации:</b>\n\n"
+        for r in rows:
+            uname = f"@{r['username']}" if r['username'] else f"ID: {r['user_id']}"
+            tag_str = f" [{r['tag']}]" if r['tag'] else ""
+            text += f"▪️ {uname}{tag_str} — Роль: <b>{r['role']}</b>\n"
+            
+        await message.answer(text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Ошибка adminlist: {e}")
+
+# --- КОМАНДА РАССЫЛКИ (/broadcast) ---
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: types.Message, state: FSMContext):
+    try:
+        caller_role = await get_admin_role(message.from_user.id)
+        if caller_role not in ['owner', 'director']:
+            return await message.answer("❌ Недостаточно прав для рассылки.")
+            
+        await message.answer("📢 Отправьте сообщение, которое будет разослано всем пользователям бота:")
+        await state.set_state(BroadcastState.waiting_for_broadcast)
+    except Exception as e:
+        logger.error(f"Ошибка broadcast: {e}")
+
+@dp.message(BroadcastState.waiting_for_broadcast)
+async def process_broadcast(message: types.Message, state: FSMContext):
+    try:
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch("SELECT user_id FROM users;")
+            
+        success = 0
+        failed = 0
+        
+        status_msg = await message.answer("⏳ Рассылка началась...")
+        
+        for u in users:
+            try:
+                await message.send_copy(chat_id=u["user_id"])
+                success += 1
+                await asyncio.sleep(0.05)  # Защита от флуд-контроля Telegram
+            except Exception:
+                failed += 1
+                
+        await status_msg.edit_text(f"✅ <b>Рассылка завершена!</b>\n\n"
+                                   f"├ Успешно отправлено: {success}\n"
+                                   f"└ Ошибок (заблокировали бота): {failed}", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Ошибка процесса рассылки: {e}")
+        await message.answer("❌ Произошла ошибка во время рассылки.")
+    finally:
+        await state.clear()
+
 # --- КОМАНДЫ ПОСТИНГА ---
 @dp.message(Command("post"))
 async def cmd_post(message: types.Message, state: FSMContext):
@@ -150,7 +290,6 @@ async def cmd_post(message: types.Message, state: FSMContext):
 
 @dp.message(PostState.waiting_for_post)
 async def process_post(message: types.Message, state: FSMContext):
-    CHANNEL_ID = "@eve_ning_glow"
     try:
         sent_msg = await message.send_copy(chat_id=CHANNEL_ID)
         async with db_pool.acquire() as conn:
@@ -161,7 +300,7 @@ async def process_post(message: types.Message, state: FSMContext):
         await message.answer(f"✅ Пост успешно опубликован в канал! ID: {sent_msg.message_id}")
     except TelegramAPIError as e:
         logger.error(f"Ошибка Telegram API при постинге: {e}")
-        await message.answer(f"❌ Ошибка Telegram при публикации: {e}")
+        await message.answer(f"❌ Ошибка Telegram при публикации: {e} (убедитесь, что бот админ в канале {CHANNEL_ID})")
     except Exception as e:
         logger.error(f"Непредвиденная ошибка при постинге: {e}")
         await message.answer(f"❌ Ошибка при публикации: {e}")
@@ -211,7 +350,7 @@ async def set_role_command(message: types.Message):
         logger.error(f"Ошибка управления ролями: {e}")
         await message.answer("❌ Произошла ошибка при изменении роли.")
 
-# --- СТАТИСТИКА ---
+# --- СТАТИСТИКА (/stats и /adminstats) ---
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     try:
