@@ -116,6 +116,12 @@ async def init_db():
                     text TEXT
                 );
             """)
+            # Гарантированно добавляем владельца в таблицу администраторов при запуске
+            await conn.execute("""
+                INSERT INTO admins (user_id, role, tag) 
+                VALUES ($1, 'owner', 'Владелец')
+                ON CONFLICT (user_id) DO UPDATE SET role = 'owner';
+            """, OWNER_ID)
         logger.info("База данных успешно инициализирована.")
     except Exception as e:
         logger.critical(f"Ошибка при инициализации базы данных: {e}")
@@ -152,11 +158,12 @@ async def cmd_start(message: types.Message):
 @dp.message(F.text.in_({"/help", ".help", "/хелп", ".хелп"}))
 async def cmd_help(message: types.Message):
     try:
-        if message.chat.type == "private":
-            return await message.answer("ℹ️ Это бот технической поддержки. Напишите ваше сообщение, и оно автоматически создаст обращение для администраторов.")
-        
         caller_id = message.from_user.id
         role = await get_admin_role(caller_id)
+        
+        # Если пишет обычный пользователь в личке
+        if message.chat.type == "private" and not role:
+            return await message.answer("ℹ️ Это бот технической поддержки. Напишите ваше сообщение, и оно автоматически создаст обращение для администраторов.")
         
         if not role:
             return await message.answer("❌ У вас нет доступа к командам администратора.")
@@ -194,7 +201,6 @@ async def send_custom_template_post(message: types.Message):
         if not template:
             return await message.answer("❌ Шаблон не найден.")
 
-        # Если публикуется пост 4 или 5 (о возобновлении работы), удаляем предыдущий пост о неполадках/техработах (1 или 3)
         if key in ("4", "5") and last_tech_message_id:
             try:
                 await bot.delete_message(chat_id=CHANNEL_ID, message_id=last_tech_message_id)
@@ -202,7 +208,6 @@ async def send_custom_template_post(message: types.Message):
                 logger.warning(f"Не удалось удалить старое сообщение: {e}")
             last_tech_message_id = None
 
-        # Отправляем фото с текстом в канал
         sent_msg = await bot.send_photo(
             chat_id=CHANNEL_ID,
             photo=template["photo"],
@@ -210,11 +215,9 @@ async def send_custom_template_post(message: types.Message):
             parse_mode=ParseMode.HTML
         )
 
-        # Если это был пост о проблемах/техработах, запоминаем его ID для последующего удаления
         if key in ("1", "3"):
             last_tech_message_id = sent_msg.message_id
 
-        # Сохраняем в базу
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO channel_posts (message_id, channel_id, text) VALUES ($1, $2, $3);",
@@ -420,7 +423,7 @@ async def cmd_admin_stats(message: types.Message):
 # --- ТИКЕТЫ И ОБРАЩЕНИЯ ИЗ ЛИЧКИ ---
 @dp.message(F.chat.type == "private")
 async def private_msg(message: types.Message):
-    if message.text and message.text.startswith(("/start", "пост")):
+    if message.text and (message.text.startswith(("/start", "/help", ".help", "/хелп", ".хелп", "пост")) or message.text in {"/id", ".ид", "/stats"}):
         return
     user_id = message.from_user.id
     username = message.from_user.username
