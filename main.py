@@ -150,7 +150,7 @@ async def cmd_post(message: types.Message, state: FSMContext):
 
 @dp.message(PostState.waiting_for_post)
 async def process_post(message: types.Message, state: FSMContext):
-    CHANNEL_ID = "@my_channel"
+    CHANNEL_ID = "@eve_ning_glow"
     try:
         sent_msg = await message.send_copy(chat_id=CHANNEL_ID)
         async with db_pool.acquire() as conn:
