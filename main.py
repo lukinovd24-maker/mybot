@@ -18,7 +18,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "8641353697:AAFMiUKpQOc3EL1SUV5qijWkEPzKrAdLY3s"
+# Если вписываешь токен сюда вручную, ОБЯЗАТЕЛЬНО используй кавычки! 
+# Например: BOT_TOKEN = "8641353697:AAFMi..."
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))
 DB_DSN = os.getenv("DATABASE_URL")
@@ -38,7 +40,6 @@ class BroadcastState(StatesGroup):
     waiting_for_broadcast = State()
 
 # --- ШАБЛОНЫ ПОСТОВ ---
-# Если будет ошибка "wrong remote file identifier", обнови эти длинные коды через функцию, которая есть ниже в коде!
 POST_TEMPLATES = {
     "1": {
         "photo": "AgACAgEAAxkBAAIHomqBVpn-nDfOlHe6GkV9Eu8Wsnl4AAIcDGsb1MkQROyB6LwuPOFnAQADAgADeQADPQQ",
@@ -85,7 +86,7 @@ async def init_db():
                     role TEXT CHECK (role IN ('owner', 'director', 'admin', 'intern'))
                 );
                 
-                /* Безопасное добавление колонки tag для исправления ошибки */
+                /* Безопасное добавление колонки tag для старых БД */
                 ALTER TABLE admins ADD COLUMN IF NOT EXISTS tag TEXT;
                 
                 CREATE TABLE IF NOT EXISTS admin_actions (
@@ -123,7 +124,7 @@ async def get_admin_role(user_id: int) -> str:
         logger.error(f"Ошибка проверки роли: {e}")
         return None
 
-# --- КОМАНДА ДЛЯ ПОЛУЧЕНИЯ ID КАРТИНОК (если шаблоны выдают ошибку) ---
+# --- КОМАНДА ДЛЯ ПОЛУЧЕНИЯ ID КАРТИНОК ---
 @dp.message(F.photo, F.from_user.id == OWNER_ID)
 async def get_photo_id(message: types.Message):
     photo_id = message.photo[-1].file_id
@@ -150,12 +151,13 @@ async def cmd_start(message: types.Message):
     )
 
 # --- СПРАВКА ПО КОМАНДАМ ---
-@dp.message(F.text.in_({"/help", ".help", "/хелп", ".хелп"}))
+@dp.message(Command("help"))
+@dp.message(F.text.lower().in_({".help", "/хелп", ".хелп"}))
 async def cmd_help(message: types.Message):
     try:
         role = await get_admin_role(message.from_user.id)
         if message.chat.type == "private" and not role:
-            return await message.answer("ℹ️ Это бот технической поддержки. Напишите ваше сообщение, и оно автоматически создаст обращение для администраторов.")
+            return await message.answer("ℹ️ Это бот техни поддержки. Напишите ваше сообщение, и оно автоматически создаст обращение для администраторов.")
         if not role:
             return await message.answer("❌ У вас нет доступа к командам администратора.")
 
@@ -212,7 +214,8 @@ async def send_custom_template_post(message: types.Message):
         await message.answer(f"❌ Ошибка публикации. Возможно, слетели ID картинок. Отправь мне нужную картинку в личку, чтобы узнать новый ID.")
 
 # --- КОМАНДЫ АДМИНИСТРАТОРОВ ---
-@dp.message(F.text.in_({"/id", ".ид"}))
+@dp.message(Command("id"))
+@dp.message(F.text.lower() == ".ид")
 async def cmd_id(message: types.Message):
     target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
     await message.answer(
@@ -220,7 +223,8 @@ async def cmd_id(message: types.Message):
         parse_mode=ParseMode.HTML
     )
 
-@dp.message(F.text.in_({"/check", ".чек"}))
+@dp.message(Command("check"))
+@dp.message(F.text.lower() == ".чек")
 async def cmd_check(message: types.Message):
     if not await get_admin_role(message.from_user.id):
         return await message.answer("❌ У вас нет прав.")
@@ -244,7 +248,8 @@ async def cmd_addmins(message: types.Message):
         await conn.execute("UPDATE admins SET tag = $1 WHERE user_id = $2;", tag, target_id)
     await message.answer(f"✅ Администратору <code>{target_id}</code> установлен тег: <b>{tag}</b>", parse_mode=ParseMode.HTML)
 
-@dp.message(F.text.in_({"/adminlist", ".админы"}))
+@dp.message(Command("adminlist"))
+@dp.message(F.text.lower() == ".админы")
 async def cmd_adminlist(message: types.Message):
     if not await get_admin_role(message.from_user.id):
         return await message.answer("❌ Недостаточно прав.")
@@ -258,6 +263,54 @@ async def cmd_adminlist(message: types.Message):
         tag_str = f" [{r['tag']}]" if r['tag'] else ""
         text += f"▪️ {uname}{tag_str} — Роль: <b>{r['role']}</b>\n"
     await message.answer(text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("adminstats"))
+@dp.message(F.text.lower() == ".астат")
+async def cmd_admin_stats(message: types.Message):
+    if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
+        return await message.answer("❌ Недостаточно прав.")
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT admin_username, COUNT(*) as total FROM admin_actions GROUP BY admin_username ORDER BY total DESC;")
+    if not rows:
+        return await message.answer("📈 Статистика пуста. Пока ни один администратор не брал обращения через кнопку.")
+    text = "📈 <b>Статистика работы сотрудников:</b>\n\n"
+    for r in rows:
+        uname = f"@{r['admin_username']}" if r['admin_username'] else "Без юзернейма"
+        text += f"▪️ {uname}: <b>{r['total']}</b> тикетов\n"
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    if not await get_admin_role(message.from_user.id):
+        return await message.answer("❌ У вас нет доступа.")
+    async with db_pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users;") or 0
+        directors_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'director';") or 0
+        admins_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'admin';") or 0
+        interns_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'intern';") or 0
+        total_admins_db = await conn.fetchval("SELECT COUNT(*) FROM admins;") or 0
+        admin_actions = await conn.fetchval("SELECT COUNT(*) FROM admin_actions;") or 0
+        
+    regular_users = max(0, total_users - total_admins_db)
+    user_msgs = total_users * 2 
+    total_msgs = user_msgs + admin_actions
+
+    stats_text = (
+        "📊 <b>Полная статистика бота:</b>\n\n"
+        f"👥 Всего пользователей: <b>{total_users}</b>\n"
+        f"├ 🍏 Активных: <b>{total_users}</b>\n"
+        "└ 🚫 Забаненных: <b>0</b>\n\n"
+        "🎭 <b>Разделение по ролям:</b>\n"
+        f"├ 💼 Директоров: <b>{directors_count}</b>\n"
+        f"├ 🛡 Администраторов: <b>{admins_count}</b>\n"
+        f"├ 🔰 Стажёров: <b>{interns_count}</b>\n"
+        f"└ 👤 Пользователей: <b>{regular_users}</b>\n\n"
+        "✉️ <b>Сообщения:</b>\n"
+        f"├ 📩 От пользователей: <b>{user_msgs}</b>\n"
+        f"├ 📤 От администраторов: <b>{admin_actions}</b>\n"
+        f"└ 💬 Всего сообщений: <b>{total_msgs}</b>"
+    )
+    await message.answer(stats_text, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message, state: FSMContext):
@@ -304,58 +357,13 @@ async def set_role_command(message: types.Message):
         """, target_id, new_role)
     await message.answer(f"✅ Роль <b>{new_role}</b> назначена <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
 
-@dp.message(F.text.in_({"/stats"}))
-async def cmd_stats(message: types.Message):
-    if not await get_admin_role(message.from_user.id):
-        return await message.answer("❌ У вас нет доступа.")
-    async with db_pool.acquire() as conn:
-        total_users = await conn.fetchval("SELECT COUNT(*) FROM users;") or 0
-        directors_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'director';") or 0
-        admins_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'admin';") or 0
-        interns_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'intern';") or 0
-        total_admins_db = await conn.fetchval("SELECT COUNT(*) FROM admins;") or 0
-        admin_actions = await conn.fetchval("SELECT COUNT(*) FROM admin_actions;") or 0
-        
-    regular_users = max(0, total_users - total_admins_db)
-    user_msgs = total_users * 2 
-    total_msgs = user_msgs + admin_actions
-
-    stats_text = (
-        "📊 <b>Полная статистика бота:</b>\n\n"
-        f"👥 Всего пользователей: <b>{total_users}</b>\n"
-        f"├ 🍏 Активных: <b>{total_users}</b>\n"
-        "└ 🚫 Забаненных: <b>0</b>\n\n"
-        "🎭 <b>Разделение по ролям:</b>\n"
-        f"├ 💼 Директоров: <b>{directors_count}</b>\n"
-        f"├ 🛡 Администраторов: <b>{admins_count}</b>\n"
-        f"├ 🔰 Стажёров: <b>{interns_count}</b>\n"
-        f"└ 👤 Пользователей: <b>{regular_users}</b>\n\n"
-        "✉️ <b>Сообщения:</b>\n"
-        f"├ 📩 От пользователей: <b>{user_msgs}</b>\n"
-        f"├ 📤 От администраторов: <b>{admin_actions}</b>\n"
-        f"└ 💬 Всего сообщений: <b>{total_msgs}</b>"
-    )
-    await message.answer(stats_text, parse_mode=ParseMode.HTML)
-
-@dp.message(F.text.in_({"/adminstats", ".астат"}))
-async def cmd_admin_stats(message: types.Message):
-    if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
-        return await message.answer("❌ Недостаточно прав.")
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT admin_username, COUNT(*) as total FROM admin_actions GROUP BY admin_username ORDER BY total DESC;")
-    if not rows:
-        return await message.answer("📈 Статистика пуста.")
-    text = "📈 <b>Статистика работы сотрудников:</b>\n\n"
-    for r in rows:
-        uname = f"@{r['admin_username']}" if r['admin_username'] else "Без юзернейма"
-        text += f"▪️ {uname}: <b>{r['total']}</b> тикетов\n"
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
 # --- ТИКЕТЫ И ОБРАЩЕНИЯ ИЗ ЛИЧКИ ---
 @dp.message(F.chat.type == "private")
 async def private_msg(message: types.Message):
-    if message.text and (message.text.startswith(("/start", "/help", ".help", "/хелп", ".хелп", "пост", "/id", ".ид", "/stats", ".админы", "/adminlist", ".астат", "/adminstats", "/addmins", "/check", ".чек", "/broadcast"))):
+    # Игнорируем команды, чтобы не создавать тикеты на каждое нажатие
+    if message.text and (message.text.startswith(("/", ".")) or message.text.lower().startswith("пост ")):
         return
+        
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
@@ -380,7 +388,7 @@ async def private_msg(message: types.Message):
                 forum_topic = await bot.create_forum_topic(chat_id=ADMIN_CHAT_ID, name=f"{first_name} | {user_id}")
                 topic_id = forum_topic.message_thread_id
             except TelegramAPIError:
-                return await message.answer("❌ Ошибка создания обращения.")
+                return await message.answer("❌ Ошибка создания обращения. Пожалуйста, попробуйте позже.")
 
             async with db_pool.acquire() as conn:
                 await conn.execute("UPDATE users SET topic_id = $1 WHERE user_id = $2;", topic_id, user_id)
@@ -405,10 +413,12 @@ async def private_msg(message: types.Message):
 async def take_pz(callback: types.CallbackQuery):
     target_id = int(callback.data.split("_")[2])
     admin_mention = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.first_name
+    
     async with db_pool.acquire() as conn:
         user_row = await conn.fetchrow("SELECT username, topic_id FROM users WHERE user_id = $1;", target_id)
         await conn.execute("INSERT INTO admin_actions (admin_id, admin_username, target_user_id) VALUES ($1, $2, $3);", 
                            callback.from_user.id, callback.from_user.username, target_id)
+                           
     if not user_row or not user_row["topic_id"]:
         return await callback.answer("❌ Топик не найден.", show_alert=True)
 
