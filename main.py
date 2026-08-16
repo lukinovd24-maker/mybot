@@ -34,39 +34,52 @@ db_pool: asyncpg.Pool = None
 # Глобальная переменная для хранения ID последнего технического поста (для автоудаления)
 last_tech_message_id = None
 
-class PostState(StatesGroup):
-    waiting_for_post = State()
-
 class BroadcastState(StatesGroup):
     waiting_for_broadcast = State()
 
-# --- ШАБЛОНЫ ПОСТОВ С КАРТИНКАМИ (ЗАМЕНИ file_id НА СВОИ) ---
+# --- ТВОИ ШАБЛОНЫ ПОСТОВ С ФОТО И ТЕКСТАМИ ---
 POST_TEMPLATES = {
     "1": {
-        "photo": "ЗДЕСЬ_ВСТАВЬ_FILE_ID_ПЕРВОЙ_КАРТИНКИ",
+        "photo": "AgACAgEAAxkBAAIHomqBVpn-nDfOlHe6GkV9Eu8Wsnl4AAIcDGsb1MkQROyB6LwuPOFnAQADAgADeQADPQQ",
         "text": (
-            "⚠️ <b>Внимание, технический перерыв!</b>\n\n"
-            "Бот временно не работает по техническим неполадкам. Мы уже занимаемся решением проблемы и скоро вернемся в строй. Благодарим за понимание! 🛠"
+            "🛠 <b>Внимание: Технический перерыв</b>\n\n"
+            "Бот временно приостанавливает работу для проведения плановых технических работ. Скоро снова вернемся в строй, спасибо за ожидание!"
         )
     },
     "2": {
-        "photo": "ЗДЕСЬ_ВСТАВЬ_FILE_ID_ВТОРОЙ_КАРТИНКИ",
+        "photo": "AgACAgEAAxkBAAIHpmqBV4Ym5NrmF3M1dt4EOLjMgPx6AAIbDGsb1MkQRBiVtlXZfeT_AQADAgADeQADPQQ",
         "text": (
-            "🎉 <b>Мы снова в строю!</b>\n\n"
-            "Бот успешно возобновил работу, все ошибки устранены. Можете продолжать общение и отправлять обращения. Приятного пользования! ✨"
+            "🔄 <b>Обновление системы</b>\n\n"
+            "Мы установили свежее обновление! Бот стал еще стабильнее и быстрее. Приятного использования."
         )
     },
     "3": {
-        "photo": "ЗДЕСЬ_ВСТАВЬ_FILE_ID_ТРЕТЬЕЙ_КАРТИНКИ",
-        "text": "📌 <b>Текст шаблона 3</b>"
+        "photo": "AgACAgEAAxkBAAIHqGqBV6ZrZD72sMa54lXudN7wOmN2AAIaDGsb1MkQRDAwd7n4XwNcAQADAgADeQADPQQ",
+        "text": (
+            "⚠️ <b>Технические неполадки</b>\n\n"
+            "Зафиксированы кратковременные технические неполадки. Специалисты уже занимаются их устранением."
+        )
     },
     "4": {
-        "photo": "ЗДЕСЬ_ВСТАВЬ_FILE_ID_ЧЕТВЕРТОЙ_КАРТИНКИ",
-        "text": "📌 <b>Текст шаблона 4</b>"
+        "photo": "AgACAgEAAxkBAAIHqmqBV8mmLrLScIsh5Yp_f2fO_IBoAAIZDGsb1MkQRENjPsVEPDrLAQADAgADeQADPQQ",
+        "text": (
+            "🟢 <b>Бот работает в штатном режиме</b>\n\n"
+            "Все системы функционируют стабильно. Можете продолжать отправлять обращения!"
+        )
     },
     "5": {
-        "photo": "ЗДЕСЬ_ВСТАВЬ_FILE_ID_ПЯТОЙ_КАРТИНКИ",
-        "text": "📌 <b>Текст шаблона 5</b>"
+        "photo": "AgACAgEAAxkBAAIHrGqBV_o0bNZUKlfax3cFbJLW-Oh6AAIYDGsb1MkQRKC2gU96LUkeAQADAgADeQADPQQ",
+        "text": (
+            "✅ <b>Технический перерыв завершен</b>\n\n"
+            "Работы успешно завершены, бот возобновил полноценную работу в штатном режиме."
+        )
+    },
+    "6": {
+        "photo": "AgACAgEAAxkBAAIHrmqBWBiT6kR8JGfgRN44yz92bZ9aAAIXDGsb1MkQRAljMvCDBCuVAQADAgADeQADPQQ",
+        "text": (
+            "✨ <b>Результаты обновления</b>\n\n"
+            "Обновление успешно развернуто. Все новые функции и улучшения уже доступны."
+        )
     }
 }
 
@@ -119,12 +132,6 @@ async def get_admin_role(user_id: int) -> str:
         logger.error(f"Ошибка проверки роли для {user_id}: {e}")
         return None
 
-# --- ПОМОЩНИК ДЛЯ ПОЛУЧЕНИЯ FILE_ID КАРТИНОК (ОТПРАВЬ ФОТО БОТУ, ОН ВЕРНЕТ ID) ---
-@dp.message(F.photo, F.from_user.id == OWNER_ID)
-async def get_photo_id(message: types.Message):
-    photo = message.photo[-1]
-    await message.answer(f"📸 <b>file_id этой фотографии:</b>\n\n<code>{photo.file_id}</code>", parse_mode=ParseMode.HTML)
-
 # --- ПРИВЕТСТВЕННОЕ СООБЩЕНИЕ (/start) ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -169,7 +176,7 @@ async def cmd_help(message: types.Message):
             "├ /setintern [юз/ID] — Назначить стажёра\n"
             "└ /demote [юз/ID] — Понизить до пользователя\n\n"
             "📢 <b>Шаблоны постов (пиши в чат):</b>\n"
-            "└ <i>пост 1, пост 2, пост 3, пост 4, пост 5</i>"
+            "└ <i>пост 1, пост 2, пост 3, пост 4, пост 5, пост 6</i>"
         )
 
         await message.answer(help_text, parse_mode=ParseMode.HTML)
@@ -177,7 +184,7 @@ async def cmd_help(message: types.Message):
         logger.error(f"Ошибка в команде help: {e}")
 
 # --- АВТОМАТИЧЕСКИЕ ШАБЛОНЫ ПОСТОВ С КАРТИНКАМИ И УДАЛЕНИЕМ ---
-@dp.message(F.text.in_({"пост 1", "пост 2", "пост 3", "пост 4", "пост 5"}), F.from_user.id == OWNER_ID)
+@dp.message(F.text.in_({"пост 1", "пост 2", "пост 3", "пост 4", "пост 5", "пост 6"}), F.from_user.id == OWNER_ID)
 async def send_custom_template_post(message: types.Message):
     global last_tech_message_id
     try:
@@ -187,8 +194,8 @@ async def send_custom_template_post(message: types.Message):
         if not template:
             return await message.answer("❌ Шаблон не найден.")
 
-        # Если это пост 2 (все работает), пробуем автоматически удалить предыдущий пост 1 (техработы)
-        if key == "2" and last_tech_message_id:
+        # Если публикуется пост 4 или 5 (о возобновлении работы), удаляем предыдущий пост о неполадках/техработах (1 или 3)
+        if key in ("4", "5") and last_tech_message_id:
             try:
                 await bot.delete_message(chat_id=CHANNEL_ID, message_id=last_tech_message_id)
             except Exception as e:
@@ -203,8 +210,8 @@ async def send_custom_template_post(message: types.Message):
             parse_mode=ParseMode.HTML
         )
 
-        # Если это был пост 1, запоминаем его ID для последующего удаления
-        if key == "1":
+        # Если это был пост о проблемах/техработах, запоминаем его ID для последующего удаления
+        if key in ("1", "3"):
             last_tech_message_id = sent_msg.message_id
 
         # Сохраняем в базу
@@ -352,7 +359,7 @@ async def set_role_command(message: types.Message):
     except Exception as e:
         logger.error(f"Ошибка ролей: {e}")
 
-# --- СТАТИСТИКА (/stats) С ПОДРОБНЫМ ШАБЛОНОМ ---
+# --- СТАТИСТИКА (/stats) ---
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     try:
