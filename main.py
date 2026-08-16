@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = 8641353697:AAFMiUKpQOc3EL1SUV5qijWkEPzKrAdLY3s
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))
 DB_DSN = os.getenv("DATABASE_URL")
