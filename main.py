@@ -18,8 +18,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- НАСТРОЙКИ ---
-# Если вписываешь токен сюда вручную, ОБЯЗАТЕЛЬНО используй кавычки! 
-# Например: BOT_TOKEN = "8641353697:AAFMi..."
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))
@@ -43,11 +41,11 @@ class BroadcastState(StatesGroup):
 POST_TEMPLATES = {
     "1": {
         "photo": "AgACAgEAAxkBAAIHomqBVpn-nDfOlHe6GkV9Eu8Wsnl4AAIcDGsb1MkQROyB6LwuPOFnAQADAgADeQADPQQ",
-        "text": "🛠 <b>Внимание: Технический перерыв</b>\n\nБот временно приостанавливает работу для проведения плановых технических работ. Скоро снова вернемся в строй, спасибо за ожидание!"
+        "text": "🛠 <b>Внимание: Технический перерыв</b>\n\nБот временно приостанавливает работу для проведения плановых технических работ."
     },
     "2": {
         "photo": "AgACAgEAAxkBAAIHpmqBV4Ym5NrmF3M1dt4EOLjMgPx6AAIbDGsb1MkQRBiVtlXZfeT_AQADAgADeQADPQQ",
-        "text": "🔄 <b>Обновление системы</b>\n\nМы установили свежее обновление! Бот стал еще стабильнее и быстрее. Приятного использования."
+        "text": "🔄 <b>Обновление системы</b>\n\nМы установили свежее обновление! Бот стал еще стабильнее и быстрее."
     },
     "3": {
         "photo": "AgACAgEAAxkBAAIHqGqBV6ZrZD72sMa54lXudN7wOmN2AAIaDGsb1MkQRDAwd7n4XwNcAQADAgADeQADPQQ",
@@ -86,8 +84,11 @@ async def init_db():
                     role TEXT CHECK (role IN ('owner', 'director', 'admin', 'intern'))
                 );
                 
-                /* Безопасное добавление колонки tag для старых БД */
+                /* Безопасное добавление колонок для старых БД */
                 ALTER TABLE admins ADD COLUMN IF NOT EXISTS tag TEXT;
+                ALTER TABLE admins ADD COLUMN IF NOT EXISTS warns INT DEFAULT 0;
+                ALTER TABLE admins ADD COLUMN IF NOT EXISTS curator_id BIGINT DEFAULT NULL;
+                ALTER TABLE admins ADD COLUMN IF NOT EXISTS closed_tickets INT DEFAULT 0;
                 
                 CREATE TABLE IF NOT EXISTS admin_actions (
                     id SERIAL PRIMARY KEY,
@@ -128,12 +129,7 @@ async def get_admin_role(user_id: int) -> str:
 @dp.message(F.photo, F.from_user.id == OWNER_ID)
 async def get_photo_id(message: types.Message):
     photo_id = message.photo[-1].file_id
-    await message.answer(
-        f"📸 <b>ID вашей картинки:</b>\n\n"
-        f"<code>{photo_id}</code>\n\n"
-        f"Скопируйте его и вставьте в `POST_TEMPLATES` вместо старого, если есть ошибка с отправкой.",
-        parse_mode=ParseMode.HTML
-    )
+    await message.answer(f"📸 <b>ID вашей картинки:</b>\n\n<code>{photo_id}</code>", parse_mode=ParseMode.HTML)
 
 # --- ПРИВЕТСТВЕННОЕ СООБЩЕНИЕ ---
 @dp.message(Command("start"))
@@ -154,33 +150,35 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("help"))
 @dp.message(F.text.lower().in_({".help", "/хелп", ".хелп"}))
 async def cmd_help(message: types.Message):
-    try:
-        role = await get_admin_role(message.from_user.id)
-        if message.chat.type == "private" and not role:
-            return await message.answer("ℹ️ Это бот техни поддержки. Напишите ваше сообщение, и оно автоматически создаст обращение для администраторов.")
-        if not role:
-            return await message.answer("❌ У вас нет доступа к командам администратора.")
+    role = await get_admin_role(message.from_user.id)
+    if message.chat.type == "private" and not role:
+        return await message.answer("ℹ️ Напишите ваше сообщение, и оно автоматически создаст обращение для администраторов.")
+    if not role:
+        return await message.answer("❌ У вас нет доступа к командам администратора.")
 
-        help_text = (
-            "📌 <b>Список доступных команд:</b>\n\n"
-            "👑 <b>Администрация:</b>\n"
-            "├ /stats — Полная статистика бота\n"
-            "├ /adminstats (или .астат) — Статистика взятых ПЗ\n"
-            "├ /adminlist (или .админы) — Список состава\n"
-            "├ /check или .чек — Проверить пользователя\n"
-            "├ /broadcast — Сделать рассылку пользователям\n"
-            "├ /addmins [юз/ID] [тег] — Установить админ-тег\n"
-            "├ /id или .ид — Узнать ID пользователя\n"
-            "├ /setdirector [юз/ID] — Назначить директора\n"
-            "├ /setadmin [юз/ID] — Назначить администратора\n"
-            "├ /setintern [юз/ID] — Назначить стажёра\n"
-            "└ /demote [юз/ID] — Понизить до пользователя\n\n"
-            "📢 <b>Шаблоны постов (пиши в чат):</b>\n"
-            "└ <i>пост 1, пост 2, пост 3, пост 4, пост 5, пост 6</i>"
-        )
-        await message.answer(help_text, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        logger.error(f"Ошибка в help: {e}")
+    help_text = (
+        "📌 <b>Список доступных команд:</b>\n\n"
+        "👑 <b>Управление и Статистика:</b>\n"
+        "├ /stats — Полная статистика бота\n"
+        "├ /adminstats — Статистика закрытых тикетов\n"
+        "├ /adminlist — Список состава\n"
+        "├ /check — Проверить пользователя (ответом)\n"
+        "├ /id — Узнать ID пользователя (ответом)\n"
+        "└ /broadcast — Сделать рассылку пользователям\n\n"
+        "🛡 <b>Роли и Дисциплина:</b>\n"
+        "├ /setdirector [ID] — Назначить директора\n"
+        "├ /setadmin [ID] — Назначить администратора\n"
+        "├ /setintern [ID] — Назначить стажёра\n"
+        "├ /demote [ID] — Уволить (понизить до пользователя)\n"
+        "├ /addmins [ID] [тег] — Установить тег\n"
+        "├ /setcurator [ID_админа] [ID_куратора] — Привязать куратора\n"
+        "├ /warn [ID] — Выдать выговор (5 = автокик)\n"
+        "└ /unwarn [ID] — Сбросить выговоры\n\n"
+        "🎫 <b>Тикеты (внутри топика пользователя):</b>\n"
+        "└ /close — Закрыть тикет (запишет стату и уведомит юзера)\n\n"
+        "📢 <b>Шаблоны постов:</b> <i>пост 1, пост 2... пост 6</i>"
+    )
+    await message.answer(help_text, parse_mode=ParseMode.HTML)
 
 # --- АВТОМАТИЧЕСКИЕ ШАБЛОНЫ ПОСТОВ ---
 @dp.message(F.text.in_({"пост 1", "пост 2", "пост 3", "пост 4", "пост 5", "пост 6"}), F.from_user.id == OWNER_ID)
@@ -210,10 +208,100 @@ async def send_custom_template_post(message: types.Message):
                                sent_msg.message_id, sent_msg.chat.id, template["text"])
             
         await message.answer(f"✅ Пост #{key} успешно опубликован!")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка публикации. Возможно, слетели ID картинок. Отправь мне нужную картинку в личку, чтобы узнать новый ID.")
+    except Exception:
+        await message.answer(f"❌ Ошибка публикации.")
 
-# --- КОМАНДЫ АДМИНИСТРАТОРОВ ---
+# --- КОМАНДЫ АДМИНИСТРАТОРОВ (Управление составом) ---
+@dp.message(Command(commands=["setdirector", "setadmin", "setintern", "demote"]))
+async def set_role_command(message: types.Message):
+    if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
+        return await message.answer("❌ Недостаточно прав.")
+    args = message.text.split()
+    if len(args) < 2:
+        return await message.answer("⚠️ Использование: /command <user_id>")
+    target_id = int(args[1])
+    command = args[0][1:].split('@')[0]
+    
+    async with db_pool.acquire() as conn:
+        if command == "demote":
+            await conn.execute("DELETE FROM admins WHERE user_id = $1;", target_id)
+            return await message.answer(f"✅ Пользователь <code>{target_id}</code> уволен и удален из БД.", parse_mode=ParseMode.HTML)
+        role_map = {"setdirector": "director", "setadmin": "admin", "setintern": "intern"}
+        new_role = role_map.get(command)
+        await conn.execute("""
+            INSERT INTO admins (user_id, role) VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET role = $2;
+        """, target_id, new_role)
+    await message.answer(f"✅ Роль <b>{new_role}</b> назначена <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("addmins"))
+async def cmd_addmins(message: types.Message):
+    if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
+        return await message.answer("❌ Недостаточно прав.")
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        return await message.answer("⚠️ Использование: /addmins <user_id> <тег>")
+    target_id, tag = int(args[1]), args[2]
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE admins SET tag = $1 WHERE user_id = $2;", tag, target_id)
+    await message.answer(f"✅ Администратору <code>{target_id}</code> установлен тег: <b>{tag}</b>", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("setcurator"))
+async def cmd_set_curator(message: types.Message):
+    if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
+        return await message.answer("❌ Недостаточно прав.")
+    args = message.text.split()
+    if len(args) < 3:
+        return await message.answer("⚠️ Использование: /setcurator <ID_админа> <ID_куратора>")
+    admin_id, curator_id = int(args[1]), int(args[2])
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE admins SET curator_id = $1 WHERE user_id = $2;", curator_id, admin_id)
+    await message.answer(f"✅ Админу <code>{admin_id}</code> назначен куратор: <code>{curator_id}</code>.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("warn"))
+async def cmd_warn(message: types.Message):
+    if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
+        return await message.answer("❌ Нет прав.")
+    args = message.text.split()
+    if len(args) < 2: 
+        return await message.answer("⚠️ Использование: /warn <ID_админа>")
+    target_id = int(args[1])
+    
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT warns, curator_id FROM admins WHERE user_id = $1;", target_id)
+        if not row: 
+            return await message.answer("❌ Админ не найден.")
+            
+        new_warns = row['warns'] + 1
+        if new_warns >= 5:
+            await conn.execute("DELETE FROM admins WHERE user_id = $1;", target_id)
+            try:
+                await bot.ban_chat_member(chat_id=ADMIN_CHAT_ID, user_id=target_id)
+                await bot.unban_chat_member(chat_id=ADMIN_CHAT_ID, user_id=target_id)
+                await message.answer(f"⚠️ Админ {target_id} получил 5/5 выговоров. Снят с поста и удален из админ-чата.")
+            except Exception as e:
+                await message.answer(f"⚠️ Админ снят (5/5 выговоров), но кикнуть из чата не удалось: {e}")
+        else:
+            await conn.execute("UPDATE admins SET warns = $1 WHERE user_id = $2;", new_warns, target_id)
+            await message.answer(f"⚠️ Выговор выдан. Статус: <b>{new_warns}/5</b>", parse_mode=ParseMode.HTML)
+            if row['curator_id']:
+                try:
+                    await bot.send_message(row['curator_id'], f"⚠️ Ваш подопечный {target_id} получил выговор! ({new_warns}/5)")
+                except Exception:
+                    pass
+
+@dp.message(Command("unwarn"))
+async def cmd_unwarn(message: types.Message):
+    if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
+        return await message.answer("❌ Нет доступа.")
+    args = message.text.split()
+    if len(args) < 2: return await message.answer("Использование: /unwarn <ID>")
+    target_id = int(args[1])
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE admins SET warns = 0 WHERE user_id = $1;", target_id)
+    await message.answer(f"✅ Выговоры админу <code>{target_id}</code> обнулены.", parse_mode=ParseMode.HTML)
+
+# --- ИНФОРМАЦИЯ И СТАТИСТИКА ---
 @dp.message(Command("id"))
 @dp.message(F.text.lower() == ".ид")
 async def cmd_id(message: types.Message):
@@ -233,20 +321,8 @@ async def cmd_check(message: types.Message):
     target = message.reply_to_message.from_user
     async with db_pool.acquire() as conn:
         user_data = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1;", target.id)
-    has_ticket = "Да (топик создан)" if user_data and user_data["topic_id"] else "Нет активных тикетов"
+    has_ticket = "Да (топик открыт)" if user_data and user_data["topic_id"] else "Нет активных тикетов"
     await message.answer(f"🔍 <b>Проверка:</b>\n├ Имя: {target.first_name}\n├ ID: <code>{target.id}</code>\n└ Тикет: {has_ticket}", parse_mode=ParseMode.HTML)
-
-@dp.message(Command("addmins"))
-async def cmd_addmins(message: types.Message):
-    if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
-        return await message.answer("❌ Недостаточно прав.")
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
-        return await message.answer("⚠️ Использование: /addmins <user_id> <тег>")
-    target_id, tag = int(args[1]), args[2]
-    async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE admins SET tag = $1 WHERE user_id = $2;", tag, target_id)
-    await message.answer(f"✅ Администратору <code>{target_id}</code> установлен тег: <b>{tag}</b>", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("adminlist"))
 @dp.message(F.text.lower() == ".админы")
@@ -254,14 +330,18 @@ async def cmd_adminlist(message: types.Message):
     if not await get_admin_role(message.from_user.id):
         return await message.answer("❌ Недостаточно прав.")
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id, username, role, tag FROM admins ORDER BY role;")
+        rows = await conn.fetch("SELECT user_id, username, role, tag, warns, curator_id, closed_tickets FROM admins ORDER BY role;")
     if not rows:
         return await message.answer("📋 Список администраторов пуст.")
+    
     text = "📋 <b>Список состава администрации:</b>\n\n"
     for r in rows:
         uname = f"@{r['username']}" if r['username'] else f"ID: {r['user_id']}"
         tag_str = f" [{r['tag']}]" if r['tag'] else ""
-        text += f"▪️ {uname}{tag_str} — Роль: <b>{r['role']}</b>\n"
+        warns = f" | ⚠️ {r['warns']}/5" if r.get('warns', 0) > 0 else ""
+        tickets = f" | 🎫 {r.get('closed_tickets', 0)}"
+        curator = f" | Кур: {r['curator_id']}" if r.get('curator_id') else ""
+        text += f"▪️ {uname}{tag_str} — <b>{r['role']}</b>{warns}{tickets}{curator}\n"
     await message.answer(text, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("adminstats"))
@@ -269,14 +349,18 @@ async def cmd_adminlist(message: types.Message):
 async def cmd_admin_stats(message: types.Message):
     if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
         return await message.answer("❌ Недостаточно прав.")
+    
+    # Теперь берем статистику прямо из счетчика closed_tickets
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT admin_username, COUNT(*) as total FROM admin_actions GROUP BY admin_username ORDER BY total DESC;")
+        rows = await conn.fetch("SELECT username, user_id, closed_tickets FROM admins WHERE closed_tickets > 0 ORDER BY closed_tickets DESC;")
+    
     if not rows:
-        return await message.answer("📈 Статистика пуста. Пока ни один администратор не брал обращения через кнопку.")
-    text = "📈 <b>Статистика работы сотрудников:</b>\n\n"
+        return await message.answer("📈 Статистика пуста. Пока ни один тикет не был закрыт командой /close.")
+    
+    text = "📈 <b>Статистика закрытых обращений:</b>\n\n"
     for r in rows:
-        uname = f"@{r['admin_username']}" if r['admin_username'] else "Без юзернейма"
-        text += f"▪️ {uname}: <b>{r['total']}</b> тикетов\n"
+        uname = f"@{r['username']}" if r['username'] else f"ID: {r['user_id']}"
+        text += f"▪️ {uname}: <b>{r['closed_tickets']}</b> закрытых тикетов\n"
     await message.answer(text, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("stats"))
@@ -298,20 +382,18 @@ async def cmd_stats(message: types.Message):
     stats_text = (
         "📊 <b>Полная статистика бота:</b>\n\n"
         f"👥 Всего пользователей: <b>{total_users}</b>\n"
-        f"├ 🍏 Активных: <b>{total_users}</b>\n"
-        "└ 🚫 Забаненных: <b>0</b>\n\n"
         "🎭 <b>Разделение по ролям:</b>\n"
         f"├ 💼 Директоров: <b>{directors_count}</b>\n"
         f"├ 🛡 Администраторов: <b>{admins_count}</b>\n"
         f"├ 🔰 Стажёров: <b>{interns_count}</b>\n"
         f"└ 👤 Пользователей: <b>{regular_users}</b>\n\n"
         "✉️ <b>Сообщения:</b>\n"
-        f"├ 📩 От пользователей: <b>{user_msgs}</b>\n"
-        f"├ 📤 От администраторов: <b>{admin_actions}</b>\n"
+        f"├ 📤 Взаимодействий админов: <b>{admin_actions}</b>\n"
         f"└ 💬 Всего сообщений: <b>{total_msgs}</b>"
     )
     await message.answer(stats_text, parse_mode=ParseMode.HTML)
 
+# --- РАССЫЛКА ---
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message, state: FSMContext):
     if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
@@ -335,32 +417,9 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     await status_msg.edit_text(f"✅ <b>Рассылка завершена!</b>\n Успешно: {success} | Ошибок: {failed}", parse_mode=ParseMode.HTML)
     await state.clear()
 
-@dp.message(Command(commands=["setdirector", "setadmin", "setintern", "demote"]))
-async def set_role_command(message: types.Message):
-    if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
-        return await message.answer("❌ Недостаточно прав.")
-    args = message.text.split()
-    if len(args) < 2:
-        return await message.answer("⚠️ Использование: /command <user_id>")
-    target_id = int(args[1])
-    command = args[0][1:].split('@')[0]
-    
-    async with db_pool.acquire() as conn:
-        if command == "demote":
-            await conn.execute("DELETE FROM admins WHERE user_id = $1;", target_id)
-            return await message.answer(f"✅ Пользователь <code>{target_id}</code> понижен.", parse_mode=ParseMode.HTML)
-        role_map = {"setdirector": "director", "setadmin": "admin", "setintern": "intern"}
-        new_role = role_map.get(command)
-        await conn.execute("""
-            INSERT INTO admins (user_id, role) VALUES ($1, $2)
-            ON CONFLICT (user_id) DO UPDATE SET role = $2;
-        """, target_id, new_role)
-    await message.answer(f"✅ Роль <b>{new_role}</b> назначена <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
-
 # --- ТИКЕТЫ И ОБРАЩЕНИЯ ИЗ ЛИЧКИ ---
 @dp.message(F.chat.type == "private")
 async def private_msg(message: types.Message):
-    # Игнорируем команды, чтобы не создавать тикеты на каждое нажатие
     if message.text and (message.text.startswith(("/", ".")) or message.text.lower().startswith("пост ")):
         return
         
@@ -416,6 +475,7 @@ async def take_pz(callback: types.CallbackQuery):
     
     async with db_pool.acquire() as conn:
         user_row = await conn.fetchrow("SELECT username, topic_id FROM users WHERE user_id = $1;", target_id)
+        # Запись в старую историю логов (admin_actions)
         await conn.execute("INSERT INTO admin_actions (admin_id, admin_username, target_user_id) VALUES ($1, $2, $3);", 
                            callback.from_user.id, callback.from_user.username, target_id)
                            
@@ -431,13 +491,51 @@ async def take_pz(callback: types.CallbackQuery):
         f"✅ <b>Обращение взято!</b> Сотрудник: <b>{admin_mention}</b>\n🔗 <a href='{topic_link}'>Перейти в топик</a>",
         parse_mode=ParseMode.HTML, disable_web_page_preview=True
     )
-    await bot.send_message(chat_id=ADMIN_CHAT_ID, message_thread_id=user_topic_id, text=f"🟢 Закреплено за {admin_mention}!", parse_mode=ParseMode.HTML)
+    await bot.send_message(chat_id=ADMIN_CHAT_ID, message_thread_id=user_topic_id, text=f"🟢 Закреплено за {admin_mention}!\n<i>Чтобы закрыть тикет, напишите здесь /close</i>", parse_mode=ParseMode.HTML)
     await callback.answer("Готово!")
+
+# --- ЗАКРЫТИЕ ТИКЕТА И ОБНОВЛЕНИЕ СТАТИСТИКИ ---
+@dp.message(Command("close"), F.chat.id == ADMIN_CHAT_ID)
+async def cmd_close_ticket(message: types.Message):
+    topic_id = message.message_thread_id
+    if not topic_id or topic_id == UNASSIGNED_TOPIC_ID:
+        return await message.answer("⚠️ Эту команду нужно использовать только внутри топика пользователя.")
+        
+    async with db_pool.acquire() as conn:
+        user_row = await conn.fetchrow("SELECT user_id FROM users WHERE topic_id = $1;", topic_id)
+        if user_row:
+            user_id = user_row["user_id"]
+            
+            # 1. Отвязываем топик от юзера
+            await conn.execute("UPDATE users SET topic_id = NULL WHERE user_id = $1;", user_id)
+            
+            # 2. Плюсуем стату админу
+            await conn.execute("UPDATE admins SET closed_tickets = closed_tickets + 1 WHERE user_id = $1;", message.from_user.id)
+            
+            await message.answer("✅ <b>Тикет успешно закрыт!</b>\nСтатистика администратора обновлена.", parse_mode=ParseMode.HTML)
+            
+            # 3. Уведомляем пользователя
+            try:
+                await bot.send_message(user_id, "✅ <b>Ваше обращение было закрыто администратором.</b>\nЕсли у вас остались вопросы, напишите новое сообщение.", parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+                
+            # 4. Закрываем сам топик на форуме в ТГ
+            try:
+                await bot.close_forum_topic(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id)
+            except Exception as e:
+                logger.error(f"Не удалось закрыть топик форума: {e}")
+        else:
+            await message.answer("❌ Пользователь для этого топика не найден в базе (возможно тикет уже закрыт).")
 
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def admin_reply(message: types.Message):
     if not message.message_thread_id or message.message_thread_id == UNASSIGNED_TOPIC_ID or message.from_user.is_bot:
         return
+    # Игнорируем команду /close, она обрабатывается выше
+    if message.text and message.text.startswith("/close"):
+        return
+        
     async with db_pool.acquire() as conn:
         user_row = await conn.fetchrow("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
     if user_row:
