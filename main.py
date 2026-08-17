@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 # --- НАСТРОЙКИ БОТА ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "0"))
+# ID топика для неразобранных заявок и анонимок
+UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))
 DB_DSN = os.getenv("DATABASE_URL")
 OWNER_ID = 8674242517 
 CHANNEL_ID = "@eve_ning_glow"
 
-# Временная зона Казахстана (UTC+5)
+# Временная зона (UTC+5)
 TZ = timezone(timedelta(hours=5))
 
 bot = Bot(token=BOT_TOKEN)
@@ -293,7 +294,13 @@ async def start_anon(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(BotStates.waiting_for_anon)
 async def process_anon(message: types.Message, state: FSMContext):
-    await bot.send_message(ADMIN_CHAT_ID, f"🎭 <b>АНОНИМНАЯ ПРЕДЛОЖКА:</b>\n\n{message.text}", parse_mode=ParseMode.HTML, message_thread_id=UNASSIGNED_TOPIC_ID)
+    # Отправляем предложку именно в топик неразобранных
+    await bot.send_message(
+        ADMIN_CHAT_ID, 
+        f"🎭 <b>АНОНИМНАЯ ПРЕДЛОЖКА:</b>\n\n{message.text}", 
+        parse_mode=ParseMode.HTML, 
+        message_thread_id=UNASSIGNED_TOPIC_ID
+    )
     await message.answer("✅ Отправлено анонимно! Спасибо за твою идею.")
     await state.clear()
 
@@ -491,7 +498,15 @@ async def private_msg(message: types.Message, state: FSMContext):
             
             await bot.send_message(ADMIN_CHAT_ID, message_thread_id=topic_id, text=f"📋 <b>Новый пользователь:</b> [<code>{user_id}</code>]", parse_mode=ParseMode.HTML)
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🟢 Взять обращение", callback_data=f"take_pz_{user_id}")]])
-            await bot.send_message(ADMIN_CHAT_ID, message_thread_id=UNASSIGNED_TOPIC_ID, text=f"⚠️ Новое обращение от [<code>{user_id}</code>]", reply_markup=kb, parse_mode=ParseMode.HTML)
+            
+            # Отправка в топик неразобранных
+            await bot.send_message(
+                ADMIN_CHAT_ID, 
+                message_thread_id=UNASSIGNED_TOPIC_ID, 
+                text=f"⚠️ Новое обращение от [<code>{user_id}</code>]", 
+                reply_markup=kb, 
+                parse_mode=ParseMode.HTML
+            )
 
         await message.send_copy(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id)
     except Exception as e: logger.error(f"Ошибка private_msg: {e}")
@@ -513,7 +528,9 @@ async def take_pz(callback: types.CallbackQuery):
 @dp.message(Command("close"), F.chat.id == ADMIN_CHAT_ID)
 async def cmd_close_ticket(message: types.Message):
     topic_id = message.message_thread_id
+    # Защита от закрытия в топике неразобранных или в главном чате
     if not topic_id or topic_id == UNASSIGNED_TOPIC_ID: return
+    
     async with db_pool.acquire() as conn:
         user_row = await conn.fetchrow("SELECT user_id FROM users WHERE topic_id = $1;", topic_id)
         if user_row:
@@ -541,6 +558,7 @@ async def process_rating(callback: CallbackQuery):
 
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def admin_reply(message: types.Message):
+    # Игнорируем топик неразобранных, главный чат и сообщения ботов
     if not message.message_thread_id or message.message_thread_id == UNASSIGNED_TOPIC_ID or message.from_user.is_bot: return
     if message.text and message.text.startswith("/close"): return
     async with db_pool.acquire() as conn:
