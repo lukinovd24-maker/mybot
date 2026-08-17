@@ -526,17 +526,43 @@ async def private_msg(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("take_pz_"))
 async def take_pz(callback: types.CallbackQuery):
-    target_id = int(callback.data.split("_")[2])
-    admin_id = callback.from_user.id
-    async with db_pool.acquire() as conn:
-        user_row = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1;", target_id)
-        await conn.execute("INSERT INTO admin_actions (admin_id, admin_username, target_user_id, status, action_time) VALUES ($1, $2, $3, 'open', NOW());", admin_id, callback.from_user.username, target_id)
-        await conn.execute("UPDATE admins SET taken_tickets = taken_tickets + 1 WHERE user_id = $1;", admin_id)
-    if not user_row or not user_row["topic_id"]: return await callback.answer("❌ Топик не найден.", show_alert=True)
-    
-    await callback.message.edit_text(f"✅ <b>Обращение взято!</b>", parse_mode=ParseMode.HTML)
-    await bot.send_message(chat_id=ADMIN_CHAT_ID, message_thread_id=user_row["topic_id"], text=f"🟢 Закреплено за админом!\n<i>Для закрытия напишите /close</i>", parse_mode=ParseMode.HTML)
-    await callback.answer()
+    try:
+        target_id = int(callback.data.split("_")[2])
+        admin_id = callback.from_user.id
+        admin_mention = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.first_name
+        
+        async with db_pool.acquire() as conn:
+            user_row = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1;", target_id)
+            
+            if not user_row or not user_row["topic_id"]: 
+                return await callback.answer("❌ Топик не найден.", show_alert=True)
+                
+            await conn.execute("""
+                INSERT INTO admin_actions (admin_id, admin_username, target_user_id, status, action_time) 
+                VALUES ($1, $2, $3, 'open', NOW());
+            """, admin_id, callback.from_user.username, target_id)
+            await conn.execute("UPDATE admins SET taken_tickets = taken_tickets + 1 WHERE user_id = $1;", admin_id)
+        
+        user_topic_id = user_row["topic_id"]
+        chat_id_str = str(ADMIN_CHAT_ID)
+        clean_chat_id = chat_id_str[4:] if chat_id_str.startswith("-100") else chat_id_str.lstrip("-")
+        topic_link = f"https://t.me/c/{clean_chat_id}/{user_topic_id}"
+        
+        await callback.message.edit_text(
+            f"✅ <b>Обращение взято!</b> Сотрудник: <b>{admin_mention}</b>\n🔗 <a href='{topic_link}'>Перейти в топик</a>", 
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
+        await bot.send_message(
+            chat_id=ADMIN_CHAT_ID, 
+            message_thread_id=user_topic_id, 
+            text=f"🟢 Закреплено за {admin_mention}!\n<i>Для закрытия напишите /close</i>", 
+            parse_mode=ParseMode.HTML
+        )
+        
+        await callback.answer("Готово!")
+    except Exception as e:
+        logger.error(f"Ошибка в take_pz: {e}")
+        await callback.answer("❌ Произошла ошибка.", show_alert=True)
 
 @dp.message(Command("close"), F.chat.id == ADMIN_CHAT_ID)
 async def cmd_close_ticket(message: types.Message):
