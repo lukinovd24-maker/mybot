@@ -331,13 +331,26 @@ async def cmd_help(message: types.Message):
     role = await get_admin_role(message.from_user.id)
     if not role: return await message.answer("❌ У вас нет доступа к командам администратора.")
     help_text = (
-        "📌 <b>Команды админа:</b>\n\n"
-        "👑 /stats, /adminstats, /adminlist, /check [reply], /id [reply], /broadcast\n"
-        "🛡 /setdirector [ID], /setadmin [ID], /setintern [ID], /demote [ID]\n"
-        "🛡 /addmins [ID] [тег], /setcurator [ID_админа] [ID_куратора]\n"
-        "🛡 /warn [ID], /unwarn [ID]\n"
-        "🎫 /close — Закрыть тикет\n"
-        "📢 Шаблоны постов: <i>пост 1, пост 2... пост 6</i>"
+        "📌 <b>Список доступных команд:</b>\n\n"
+        "👑 <b>Управление и Статистика:</b>\n"
+        "├ /stats — Полная статистика бота\n"
+        "├ /adminstats — Статистика закрытых тикетов\n"
+        "├ /adminlist — Список состава\n"
+        "├ /check — Проверить пользователя (ответом)\n"
+        "├ /id — Узнать ID пользователя (ответом)\n"
+        "└ /broadcast — Сделать рассылку пользователям\n\n"
+        "🛡 <b>Роли и Дисциплина:</b>\n"
+        "├ /setdirector [ID] — Назначить директора\n"
+        "├ /setadmin [ID] — Назначить администратора\n"
+        "├ /setintern [ID] — Назначить стажёра\n"
+        "├ /demote [ID] — Уволить (понизить до пользователя)\n"
+        "├ /addmins [ID] [тег] — Установить тег\n"
+        "├ /setcurator [ID_админа] [ID_куратора] — Привязать куратора\n"
+        "├ /warn [ID] — Выдать выговор (5 = автокик)\n"
+        "└ /unwarn [ID] — Сбросить выговоры\n\n"
+        "🎫 <b>Тикеты (внутри топика пользователя):</b>\n"
+        "└ /close — Закрыть тикет (запишет стату и уведомит юзера)\n\n"
+        "📢 <b>Шаблоны постов:</b> пост 1, пост 2... пост 6"
     )
     await message.answer(help_text, parse_mode=ParseMode.HTML)
 
