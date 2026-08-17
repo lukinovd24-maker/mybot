@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # --- НАСТРОЙКИ БОТА ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
-# ID топика для неразобранных заявок и анонимок
 UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))
 DB_DSN = os.getenv("DATABASE_URL")
 OWNER_ID = 8674242517 
@@ -103,7 +102,7 @@ FAQ_TEXT = (
     "<b>3. Для чего вообще нужен этот бот?</b>\n"
     "— Здесь вы можете задать вопрос администрации, предложить идею для постов (даже анонимно!), отправить теплое послание тайному другу или просто получить порцию уюта, если вам грустно. ☕️\n\n"
     "<b>4. Делаете ли вы ВП (взаимопиар) и сотрудничество?</b>\n"
-    "— Да! Мы открыты к сотрудничеству. Ознакомиться с условиями можно <a href='https://t.me/eve_ning_glow/445'>в этом посте (Условия ВП)</a>. Если ваш канал подходит, пишите сообщение прямо в этого бота!\n\n"
+    "— Да! Мы открыты к сотрудничеству. Ознакомиться с условиями можно <a href='https://t.me/eve_ning_glow/445'>в этом посте (Условия ВП)</a>. Если ваш канал কাম подходит, пишите сообщение прямо в этого бота!\n\n"
     "<b>5. Где найти правила вашего комьюнити?</b>\n"
     "— Чтобы всем было комфортно, у нас есть правила. Обязательно прочитайте их тут: <a href='https://t.me/eve_ning_glow/444'>Правила Вечернего сияния</a>.\n\n"
     "<i>Остались вопросы? Просто напишите их следующим сообщением, и первый освободившийся админ с радостью вам ответит!</i> 🌙"
@@ -141,6 +140,7 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(dsn=DB_DSN)
         async with db_pool.acquire() as conn:
+            # Создание таблиц, если их нет
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT,
@@ -151,12 +151,15 @@ async def init_db():
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS msg_count INT DEFAULT 0;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS join_date TIMESTAMP DEFAULT NOW();
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS care_sub BOOLEAN DEFAULT FALSE;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;
 
                 CREATE TABLE IF NOT EXISTS admins (
                     user_id BIGINT PRIMARY KEY, username TEXT, role TEXT, tag TEXT,
                     warns INT DEFAULT 0, curator_id BIGINT, taken_tickets INT DEFAULT 0,
                     closed_tickets INT DEFAULT 0, rating_sum INT DEFAULT 0, rating_count INT DEFAULT 0
                 );
+                ALTER TABLE admins ADD COLUMN IF NOT EXISTS taken_tickets INT DEFAULT 0;
+                ALTER TABLE admins ADD COLUMN IF NOT EXISTS closed_tickets INT DEFAULT 0;
                 ALTER TABLE admins ADD COLUMN IF NOT EXISTS rating_sum INT DEFAULT 0;
                 ALTER TABLE admins ADD COLUMN IF NOT EXISTS rating_count INT DEFAULT 0;
                 
@@ -165,6 +168,9 @@ async def init_db():
                     target_user_id BIGINT, action_time TIMESTAMP DEFAULT NOW(),
                     status TEXT DEFAULT 'open', closed_time TIMESTAMP
                 );
+                ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open';
+                ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS closed_time TIMESTAMP;
+                
                 CREATE TABLE IF NOT EXISTS channel_posts (
                     post_id SERIAL PRIMARY KEY, message_id INT, channel_id BIGINT, text TEXT
                 );
@@ -191,7 +197,8 @@ async def care_scheduler():
         now = datetime.now(TZ)
         if now.hour == 21 and now.minute == 0:
             async with db_pool.acquire() as conn:
-                users = await conn.fetch("SELECT user_id FROM users WHERE care_sub = TRUE;")
+                # Отправляем только тем, кто подписан и не заблокировал бота
+                users = await conn.fetch("SELECT user_id FROM users WHERE care_sub = TRUE AND is_blocked = FALSE;")
             text = "🌙 Вечернее Сияние напоминает: этот день позади. Выпей чаю, включи любимую музыку и отдохни. Ты молодец! ❤️"
             for u in users:
                 try:
@@ -208,8 +215,8 @@ async def cmd_start(message: types.Message):
     
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO users (user_id, username, first_name) VALUES ($1, $2, $3)
-            ON CONFLICT (user_id) DO UPDATE SET username = $2, first_name = $3;
+            INSERT INTO users (user_id, username, first_name, is_blocked) VALUES ($1, $2, $3, FALSE)
+            ON CONFLICT (user_id) DO UPDATE SET username = $2, first_name = $3, is_blocked = FALSE;
         """, message.from_user.id, message.from_user.username, message.from_user.first_name)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -294,7 +301,6 @@ async def start_anon(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(BotStates.waiting_for_anon)
 async def process_anon(message: types.Message, state: FSMContext):
-    # Отправляем предложку именно в топик неразобранных
     await bot.send_message(
         ADMIN_CHAT_ID, 
         f"🎭 <b>АНОНИМНАЯ ПРЕДЛОЖКА:</b>\n\n{message.text}", 
@@ -313,7 +319,8 @@ async def start_secret(callback: CallbackQuery, state: FSMContext):
 @dp.message(BotStates.waiting_for_secret)
 async def process_secret(message: types.Message, state: FSMContext):
     async with db_pool.acquire() as conn:
-        users = await conn.fetch("SELECT user_id FROM users WHERE user_id != $1 LIMIT 100;", message.from_user.id)
+        # Отправляем только тем, кто не заблокировал бота
+        users = await conn.fetch("SELECT user_id FROM users WHERE user_id != $1 AND is_blocked = FALSE LIMIT 100;", message.from_user.id)
         if users:
             target = random.choice(users)['user_id']
             try:
@@ -353,6 +360,116 @@ async def cmd_help(message: types.Message):
         "📢 <b>Шаблоны постов:</b> пост 1, пост 2... пост 6"
     )
     await message.answer(help_text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("id"))
+@dp.message(F.text.lower().in_({".ид", "/id"}))
+async def cmd_id(message: types.Message):
+    target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
+    await message.answer(
+        f"🆔 <b>Информация:</b>\n├ Имя: {target.first_name}\n├ Юзернейм: @{target.username}\n└ ID: <code>{target.id}</code>",
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.message(Command("check"))
+@dp.message(F.text.lower().in_({".чек", "/check"}))
+async def cmd_check(message: types.Message):
+    if not await get_admin_role(message.from_user.id): return await message.answer("❌ У вас нет прав.")
+    if not message.reply_to_message: return await message.answer("⚠️ Используйте ответом на сообщение пользователя.")
+    target = message.reply_to_message.from_user
+    async with db_pool.acquire() as conn:
+        user_data = await conn.fetchrow("SELECT topic_id, is_blocked FROM users WHERE user_id = $1;", target.id)
+    
+    if not user_data:
+        return await message.answer(f"❌ Пользователь <code>{target.id}</code> не найден в базе.", parse_mode=ParseMode.HTML)
+        
+    has_ticket = "Да (топик открыт)" if user_data["topic_id"] else "Нет активных тикетов"
+    is_blocked = "🚫 Да" if user_data["is_blocked"] else "🍏 Нет (Активен)"
+    
+    await message.answer(
+        f"🔍 <b>Проверка:</b>\n"
+        f"├ Имя: {target.first_name}\n"
+        f"├ ID: <code>{target.id}</code>\n"
+        f"├ Бот заблокирован: {is_blocked}\n"
+        f"└ Тикет: {has_ticket}", 
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.message(Command("adminlist"))
+@dp.message(F.text.lower().in_({".админы", "/adminlist"}))
+async def cmd_adminlist(message: types.Message):
+    if not await get_admin_role(message.from_user.id): return
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, username, role, tag, warns FROM admins ORDER BY role;")
+    text = "📋 <b>Состав:</b>\n\n"
+    for r in rows: text += f"▪️ ID {r['user_id']} — <b>{r['role']}</b> [{r['tag']}] | ⚠️ {r['warns']}/5\n"
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("adminstats"))
+@dp.message(F.text.lower().in_({".астат", "/adminstats"}))
+async def cmd_admin_stats(message: types.Message):
+    if await get_admin_role(message.from_user.id) not in ['owner', 'director']: 
+        return await message.answer("❌ Недостаточно прав для просмотра этой статистики.")
+    async with db_pool.acquire() as conn:
+        query = """
+            SELECT a.admin_id, MAX(a.admin_username) as admin_username,
+                   COUNT(*) AS total_taken, COUNT(*) FILTER (WHERE a.status = 'closed') AS total_closed,
+                   COUNT(*) FILTER (WHERE a.status = 'open') AS total_open,
+                   MAX(ad.rating_sum) as r_sum, MAX(ad.rating_count) as r_count
+            FROM admin_actions a
+            JOIN admins ad ON a.admin_id = ad.user_id
+            GROUP BY a.admin_id ORDER BY total_taken DESC;
+        """
+        rows = await conn.fetch(query)
+    if not rows: return await message.answer("📈 Статистика пуста.")
+    text = "📈 <b>Статистика админов:</b>\n\n"
+    for r in rows:
+        r_sum = r['r_sum'] or 0
+        r_count = r['r_count'] or 0
+        rating = f"{(r_sum / r_count):.1f}⭐️" if r_count > 0 else "Нет оценок"
+        text += f"👤 <b>ID: {r['admin_id']}</b>\n ├ Взято: {r['total_taken']} | Закрыто: {r['total_closed']} | ⚠️ Открыто: {r['total_open']}\n └ Рейтинг: {rating}\n\n"
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+@dp.message(Command("stats"))
+@dp.message(F.text.lower().in_({".стат", "/stats"}))
+async def cmd_stats(message: types.Message):
+    if not await get_admin_role(message.from_user.id): return
+    
+    async with db_pool.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM users;") or 0
+        banned_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_blocked = TRUE;") or 0
+        active_users = total_users - banned_users
+        
+        owner_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'owner';") or 0
+        directors_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'director';") or 0
+        admins_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'admin';") or 0
+        interns_count = await conn.fetchval("SELECT COUNT(*) FROM admins WHERE role = 'intern';") or 0
+        
+        total_staff = owner_count + directors_count + admins_count + interns_count
+        regular_users = max(0, total_users - total_staff)
+        
+        user_msgs = await conn.fetchval("SELECT SUM(msg_count) FROM users;") or 0
+        admin_msgs = await conn.fetchval("SELECT COUNT(*) FROM admin_actions;") or 0
+        total_msgs = user_msgs + admin_msgs
+
+    stats_text = (
+        "📊 <b>Полная статистика бота:</b>\n\n"
+        "👥 <b>Пользователи:</b>\n"
+        f"├ Всего пользователей: <b>{total_users}</b>\n"
+        f"├ 🍏 Активных (чистых): <b>{active_users}</b>\n"
+        f"└ 🚫 Забаненных: <b>{banned_users}</b>\n\n"
+        "🎭 <b>Разделение по ролям:</b>\n"
+        f"├ 👑 Владелец: <b>{owner_count}</b>\n"
+        f"├ 💼 Директоров: <b>{directors_count}</b>\n"
+        f"├ 🛡 Администраторов: <b>{admins_count}</b>\n"
+        f"├ 🔰 Стажёров: <b>{interns_count}</b>\n"
+        f"└ 👤 Пользователей: <b>{regular_users}</b>\n\n"
+        "✉️ <b>Сообщения и активность:</b>\n"
+        f"├ 📩 От пользователей: <b>{user_msgs}</b>\n"
+        f"├ 📤 От администраторов: <b>{admin_msgs}</b>\n"
+        f"└ 💬 Всего сообщений: <b>{total_msgs}</b>"
+    )
+    
+    await message.answer(stats_text, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text.in_({"пост 1", "пост 2", "пост 3", "пост 4", "пост 5", "пост 6"}), F.from_user.id == OWNER_ID)
 async def send_custom_template_post(message: types.Message):
@@ -432,44 +549,6 @@ async def cmd_unwarn(message: types.Message):
     async with db_pool.acquire() as conn: await conn.execute("UPDATE admins SET warns = 0 WHERE user_id = $1;", int(args[1]))
     await message.answer("✅ Выговоры обнулены.")
 
-@dp.message(Command("adminlist"))
-async def cmd_adminlist(message: types.Message):
-    if not await get_admin_role(message.from_user.id): return
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id, username, role, tag, warns FROM admins ORDER BY role;")
-    text = "📋 <b>Состав:</b>\n\n"
-    for r in rows: text += f"▪️ ID {r['user_id']} — <b>{r['role']}</b> [{r['tag']}] | ⚠️ {r['warns']}/5\n"
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("adminstats"))
-async def cmd_admin_stats(message: types.Message):
-    if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return
-    async with db_pool.acquire() as conn:
-        query = """
-            SELECT a.admin_id, MAX(a.admin_username) as admin_username,
-                   COUNT(*) AS total_taken, COUNT(*) FILTER (WHERE a.status = 'closed') AS total_closed,
-                   COUNT(*) FILTER (WHERE a.status = 'open') AS total_open,
-                   MAX(ad.rating_sum) as r_sum, MAX(ad.rating_count) as r_count
-            FROM admin_actions a
-            JOIN admins ad ON a.admin_id = ad.user_id
-            GROUP BY a.admin_id ORDER BY total_taken DESC;
-        """
-        rows = await conn.fetch(query)
-    if not rows: return await message.answer("📈 Статистика пуста.")
-    text = "📈 <b>Статистика админов:</b>\n\n"
-    for r in rows:
-        rating = f"{(r['r_sum'] / r['r_count']):.1f}⭐️" if r['r_count'] > 0 else "Нет оценок"
-        text += f"👤 <b>ID: {r['admin_id']}</b>\n ├ Взято: {r['total_taken']} | Закрыто: {r['total_closed']} | ⚠️ Открыто: {r['total_open']}\n └ Рейтинг: {rating}\n\n"
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
-    if not await get_admin_role(message.from_user.id): return
-    async with db_pool.acquire() as conn:
-        total_users = await conn.fetchval("SELECT COUNT(*) FROM users;") or 0
-        admin_actions = await conn.fetchval("SELECT COUNT(*) FROM admin_actions;") or 0
-    await message.answer(f"📊 <b>Статистика бота:</b>\n👥 Всего пользователей: <b>{total_users}</b>\n📤 Взаимодействий админов: <b>{admin_actions}</b>", parse_mode=ParseMode.HTML)
-
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message, state: FSMContext):
     if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return
@@ -478,16 +557,34 @@ async def cmd_broadcast(message: types.Message, state: FSMContext):
 
 @dp.message(BotStates.waiting_for_broadcast)
 async def process_broadcast(message: types.Message, state: FSMContext):
-    async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users;")
+    async with db_pool.acquire() as conn: 
+        users = await conn.fetch("SELECT user_id FROM users;")
+    
     success = 0
+    blocked = 0
     status_msg = await message.answer("⏳ Рассылка началась...")
-    for u in users:
-        try:
-            await message.send_copy(chat_id=u["user_id"])
-            success += 1
-            await asyncio.sleep(0.05)
-        except Exception: pass
-    await status_msg.edit_text(f"✅ <b>Рассылка завершена!</b>\nУспешно: {success}", parse_mode=ParseMode.HTML)
+    
+    async with db_pool.acquire() as conn:
+        for u in users:
+            try:
+                await message.send_copy(chat_id=u["user_id"])
+                success += 1
+                # Если ранее был забанен, но сейчас сообщение дошло, снимаем блокировку
+                await conn.execute("UPDATE users SET is_blocked = FALSE WHERE user_id = $1;", u["user_id"])
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                # Если ошибка связана с блокировкой бота пользователем
+                err_text = str(e).lower()
+                if "forbidden" in err_text or "bot was blocked" in err_text or "deactivated" in err_text:
+                    blocked += 1
+                    await conn.execute("UPDATE users SET is_blocked = TRUE WHERE user_id = $1;", u["user_id"])
+                
+    await status_msg.edit_text(
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"Успешно доставлено: <b>{success}</b>\n"
+        f"Заблокировали бота: <b>{blocked}</b>", 
+        parse_mode=ParseMode.HTML
+    )
     await state.clear()
 
 # --- ОБРАБОТКА ТИКЕТОВ ---
@@ -499,7 +596,8 @@ async def private_msg(message: types.Message, state: FSMContext):
     try:
         topic_id = None
         async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE users SET msg_count = msg_count + 1 WHERE user_id = $1;", user_id)
+            # При каждом сообщении обновляем счетчик и снимаем is_blocked (так как юзер сам нам пишет)
+            await conn.execute("UPDATE users SET msg_count = msg_count + 1, is_blocked = FALSE WHERE user_id = $1;", user_id)
             async with conn.transaction():
                 user_row = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1 FOR UPDATE;", user_id)
                 if user_row and user_row["topic_id"]: topic_id = user_row["topic_id"]
@@ -512,7 +610,6 @@ async def private_msg(message: types.Message, state: FSMContext):
             await bot.send_message(ADMIN_CHAT_ID, message_thread_id=topic_id, text=f"📋 <b>Новый пользователь:</b> [<code>{user_id}</code>]", parse_mode=ParseMode.HTML)
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🟢 Взять обращение", callback_data=f"take_pz_{user_id}")]])
             
-            # Отправка в топик неразобранных
             await bot.send_message(
                 ADMIN_CHAT_ID, 
                 message_thread_id=UNASSIGNED_TOPIC_ID, 
@@ -535,7 +632,7 @@ async def take_pz(callback: types.CallbackQuery):
             user_row = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1;", target_id)
             
             if not user_row or not user_row["topic_id"]: 
-                return await callback.answer("❌ Топик не найден.", show_alert=True)
+                return await callback.answer("❌ Топик не найден. Возможно, пользователь удалил чат.", show_alert=True)
                 
             await conn.execute("""
                 INSERT INTO admin_actions (admin_id, admin_username, target_user_id, status, action_time) 
@@ -550,7 +647,7 @@ async def take_pz(callback: types.CallbackQuery):
         
         await callback.message.edit_text(
             f"✅ <b>Обращение взято!</b> Сотрудник: <b>{admin_mention}</b>\n🔗 <a href='{topic_link}'>Перейти в топик</a>", 
-            parse_mode=ParseMode.HTML, disable_web_page_preview=True
+            parse_mode=ParseMode.HTML
         )
         await bot.send_message(
             chat_id=ADMIN_CHAT_ID, 
@@ -562,12 +659,11 @@ async def take_pz(callback: types.CallbackQuery):
         await callback.answer("Готово!")
     except Exception as e:
         logger.error(f"Ошибка в take_pz: {e}")
-        await callback.answer("❌ Произошла ошибка.", show_alert=True)
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 @dp.message(Command("close"), F.chat.id == ADMIN_CHAT_ID)
 async def cmd_close_ticket(message: types.Message):
     topic_id = message.message_thread_id
-    # Защита от закрытия в топике неразобранных или в главном чате
     if not topic_id or topic_id == UNASSIGNED_TOPIC_ID: return
     
     async with db_pool.acquire() as conn:
@@ -597,7 +693,6 @@ async def process_rating(callback: CallbackQuery):
 
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def admin_reply(message: types.Message):
-    # Игнорируем топик неразобранных, главный чат и сообщения ботов
     if not message.message_thread_id or message.message_thread_id == UNASSIGNED_TOPIC_ID or message.from_user.is_bot: return
     if message.text and message.text.startswith("/close"): return
     async with db_pool.acquire() as conn:
