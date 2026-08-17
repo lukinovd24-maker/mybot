@@ -88,6 +88,7 @@ async def init_db():
                 ALTER TABLE admins ADD COLUMN IF NOT EXISTS tag TEXT;
                 ALTER TABLE admins ADD COLUMN IF NOT EXISTS warns INT DEFAULT 0;
                 ALTER TABLE admins ADD COLUMN IF NOT EXISTS curator_id BIGINT DEFAULT NULL;
+                ALTER TABLE admins ADD COLUMN IF NOT EXISTS taken_tickets INT DEFAULT 0;
                 ALTER TABLE admins ADD COLUMN IF NOT EXISTS closed_tickets INT DEFAULT 0;
                 
                 CREATE TABLE IF NOT EXISTS admin_actions (
@@ -160,7 +161,7 @@ async def cmd_help(message: types.Message):
         "📌 <b>Список доступных команд:</b>\n\n"
         "👑 <b>Управление и Статистика:</b>\n"
         "├ /stats — Полная статистика бота\n"
-        "├ /adminstats — Статистика закрытых тикетов\n"
+        "├ /adminstats — Статистика взятых и закрытых тикетов\n"
         "├ /adminlist — Список состава\n"
         "├ /check — Проверить пользователя (ответом)\n"
         "├ /id — Узнать ID пользователя (ответом)\n"
@@ -330,7 +331,7 @@ async def cmd_adminlist(message: types.Message):
     if not await get_admin_role(message.from_user.id):
         return await message.answer("❌ Недостаточно прав.")
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id, username, role, tag, warns, curator_id, closed_tickets FROM admins ORDER BY role;")
+        rows = await conn.fetch("SELECT user_id, username, role, tag, warns, curator_id, taken_tickets, closed_tickets FROM admins ORDER BY role;")
     if not rows:
         return await message.answer("📋 Список администраторов пуст.")
     
@@ -339,7 +340,12 @@ async def cmd_adminlist(message: types.Message):
         uname = f"@{r['username']}" if r['username'] else f"ID: {r['user_id']}"
         tag_str = f" [{r['tag']}]" if r['tag'] else ""
         warns = f" | ⚠️ {r['warns']}/5" if r.get('warns', 0) > 0 else ""
-        tickets = f" | 🎫 {r.get('closed_tickets', 0)}"
+        
+        # Обновленное отображение тикетов
+        taken = r.get('taken_tickets', 0)
+        closed = r.get('closed_tickets', 0)
+        tickets = f" | 📥 {taken} 🎫 {closed}"
+        
         curator = f" | Кур: {r['curator_id']}" if r.get('curator_id') else ""
         text += f"▪️ {uname}{tag_str} — <b>{r['role']}</b>{warns}{tickets}{curator}\n"
     await message.answer(text, parse_mode=ParseMode.HTML)
@@ -350,17 +356,17 @@ async def cmd_admin_stats(message: types.Message):
     if await get_admin_role(message.from_user.id) not in ['owner', 'director']:
         return await message.answer("❌ Недостаточно прав.")
     
-    # Теперь берем статистику прямо из счетчика closed_tickets
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT username, user_id, closed_tickets FROM admins WHERE closed_tickets > 0 ORDER BY closed_tickets DESC;")
+        # Выбираем всех, кто брал или закрывал тикеты
+        rows = await conn.fetch("SELECT username, user_id, taken_tickets, closed_tickets FROM admins WHERE taken_tickets > 0 OR closed_tickets > 0 ORDER BY taken_tickets DESC;")
     
     if not rows:
-        return await message.answer("📈 Статистика пуста. Пока ни один тикет не был закрыт командой /close.")
+        return await message.answer("📈 Статистика пуста. Пока никто не брал обращения.")
     
-    text = "📈 <b>Статистика закрытых обращений:</b>\n\n"
+    text = "📈 <b>Статистика работы с обращениями:</b>\n\n"
     for r in rows:
         uname = f"@{r['username']}" if r['username'] else f"ID: {r['user_id']}"
-        text += f"▪️ {uname}: <b>{r['closed_tickets']}</b> закрытых тикетов\n"
+        text += f"▪️ {uname}:\n   └ 📥 Взято: <b>{r['taken_tickets']}</b> | 🎫 Закрыто: <b>{r['closed_tickets']}</b>\n"
     await message.answer(text, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("stats"))
@@ -472,12 +478,17 @@ async def private_msg(message: types.Message):
 async def take_pz(callback: types.CallbackQuery):
     target_id = int(callback.data.split("_")[2])
     admin_mention = f"@{callback.from_user.username}" if callback.from_user.username else callback.from_user.first_name
+    admin_id = callback.from_user.id
     
     async with db_pool.acquire() as conn:
         user_row = await conn.fetchrow("SELECT username, topic_id FROM users WHERE user_id = $1;", target_id)
-        # Запись в старую историю логов (admin_actions)
+        
+        # Логируем действие в историю
         await conn.execute("INSERT INTO admin_actions (admin_id, admin_username, target_user_id) VALUES ($1, $2, $3);", 
-                           callback.from_user.id, callback.from_user.username, target_id)
+                           admin_id, callback.from_user.username, target_id)
+        
+        # ДОБАВЛЕНО: Увеличиваем счетчик ВЗЯТЫХ тикетов
+        await conn.execute("UPDATE admins SET taken_tickets = taken_tickets + 1 WHERE user_id = $1;", admin_id)
                            
     if not user_row or not user_row["topic_id"]:
         return await callback.answer("❌ Топик не найден.", show_alert=True)
@@ -509,7 +520,7 @@ async def cmd_close_ticket(message: types.Message):
             # 1. Отвязываем топик от юзера
             await conn.execute("UPDATE users SET topic_id = NULL WHERE user_id = $1;", user_id)
             
-            # 2. Плюсуем стату админу
+            # 2. Плюсуем счетчик ЗАКРЫТЫХ тикетов админу
             await conn.execute("UPDATE admins SET closed_tickets = closed_tickets + 1 WHERE user_id = $1;", message.from_user.id)
             
             await message.answer("✅ <b>Тикет успешно закрыт!</b>\nСтатистика администратора обновлена.", parse_mode=ParseMode.HTML)
