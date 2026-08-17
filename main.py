@@ -102,7 +102,7 @@ FAQ_TEXT = (
     "<b>3. Для чего вообще нужен этот бот?</b>\n"
     "— Здесь вы можете задать вопрос администрации, предложить идею для постов (даже анонимно!), отправить теплое послание тайному другу или просто получить порцию уюта, если вам грустно. ☕️\n\n"
     "<b>4. Делаете ли вы ВП (взаимопиар) и сотрудничество?</b>\n"
-    "— Да! Мы открыты к сотрудничеству. Ознакомиться с условиями можно <a href='https://t.me/eve_ning_glow/445'>в этом посте (Условия ВП)</a>. Если ваш канал কাম подходит, пишите сообщение прямо в этого бота!\n\n"
+    "— Да! Мы открыты к сотрудничеству. Ознакомиться с условиями можно <a href='https://t.me/eve_ning_glow/445'>в этом посте (Условия ВП)</a>. Если ваш канал подходит, пишите сообщение прямо в этого бота!\n\n"
     "<b>5. Где найти правила вашего комьюнити?</b>\n"
     "— Чтобы всем было комфортно, у нас есть правила. Обязательно прочитайте их тут: <a href='https://t.me/eve_ning_glow/444'>Правила Вечернего сияния</a>.\n\n"
     "<i>Остались вопросы? Просто напишите их следующим сообщением, и первый освободившийся админ с радостью вам ответит!</i> 🌙"
@@ -170,6 +170,8 @@ async def init_db():
                 );
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open';
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS closed_time TIMESTAMP;
+                ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS action_time TIMESTAMP DEFAULT NOW();
+                ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS admin_username TEXT;
                 
                 CREATE TABLE IF NOT EXISTS channel_posts (
                     post_id SERIAL PRIMARY KEY, message_id INT, channel_id BIGINT, text TEXT
@@ -569,11 +571,9 @@ async def process_broadcast(message: types.Message, state: FSMContext):
             try:
                 await message.send_copy(chat_id=u["user_id"])
                 success += 1
-                # Если ранее был забанен, но сейчас сообщение дошло, снимаем блокировку
                 await conn.execute("UPDATE users SET is_blocked = FALSE WHERE user_id = $1;", u["user_id"])
                 await asyncio.sleep(0.05)
             except Exception as e:
-                # Если ошибка связана с блокировкой бота пользователем
                 err_text = str(e).lower()
                 if "forbidden" in err_text or "bot was blocked" in err_text or "deactivated" in err_text:
                     blocked += 1
@@ -596,7 +596,6 @@ async def private_msg(message: types.Message, state: FSMContext):
     try:
         topic_id = None
         async with db_pool.acquire() as conn:
-            # При каждом сообщении обновляем счетчик и снимаем is_blocked (так как юзер сам нам пишет)
             await conn.execute("UPDATE users SET msg_count = msg_count + 1, is_blocked = FALSE WHERE user_id = $1;", user_id)
             async with conn.transaction():
                 user_row = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1 FOR UPDATE;", user_id)
