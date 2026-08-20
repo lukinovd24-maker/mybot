@@ -207,11 +207,9 @@ class SecurityMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         if isinstance(event, types.Message):
-            # Проверяем только сообщения в админ-чате от реальных людей
             if event.chat.id == ADMIN_CHAT_ID and not event.from_user.is_bot:
                 user_id = event.from_user.id
                 role = await get_admin_role(user_id)
-                # Если роли нет и мы еще не предупреждали об этом человеке
                 if not role and user_id not in warned_unauthorized_users:
                     warned_unauthorized_users.add(user_id)
                     admin_mention = f"@{event.from_user.username}" if event.from_user.username else event.from_user.first_name
@@ -397,6 +395,39 @@ async def process_secret(message: types.Message, state: FSMContext):
     await state.clear()
 
 # --- СИСТЕМА АДМИНИСТРАТОРОВ И ТИКЕТОВ ---
+
+# --- ИНТЕГРАЦИЯ С TELEGRAM BUSINESS ---
+@dp.business_message(Command("search"))
+@dp.business_message(F.text.lower() == "/search")
+async def biz_search_command(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        return
+        
+    target_id = message.chat.id
+    
+    async with db_pool.acquire() as conn:
+        user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked FROM users WHERE user_id = $1;", target_id)
+        
+    if not user_data:
+        await bot.send_message(OWNER_ID, f"❌ Бизнес-поиск: Пользователь с ID <code>{target_id}</code> не найден в базе.", parse_mode=ParseMode.HTML)
+        return
+        
+    has_ticket = "Да (топик открыт)" if user_data["topic_id"] else "Нет активных тикетов"
+    is_blocked = "🚫 Да" if user_data["is_blocked"] else "🍏 Нет"
+    username_text = f"@{user_data['username']}" if user_data['username'] else "Скрыт"
+    
+    info_text = (
+        f"💼 <b>Бизнес-проверка:</b>\n"
+        f"├ Имя: {user_data['first_name']}\n"
+        f"├ Юзернейм: {username_text}\n"
+        f"├ ID: <code>{user_data['user_id']}</code>\n"
+        f"├ Бот заблокирован: {is_blocked}\n"
+        f"└ Тикет: {has_ticket}"
+    )
+    
+    # Отправляем инфу в личку с ботом, чтобы собеседник этого не увидел!
+    await bot.send_message(OWNER_ID, info_text, parse_mode=ParseMode.HTML)
+
 
 @dp.message(Command("photoid"), F.from_user.id == OWNER_ID)
 async def cmd_toggle_photoid(message: types.Message):
