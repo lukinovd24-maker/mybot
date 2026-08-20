@@ -3,8 +3,10 @@ import logging
 import os
 import random
 from datetime import datetime, timezone, timedelta
+from typing import Callable, Dict, Any, Awaitable
+
 import asyncpg
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F, types, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -33,6 +35,7 @@ dp = Dispatcher()
 db_pool: asyncpg.Pool = None
 last_tech_message_id = None
 photo_id_mode = False # Переменная для вкл/выкл режима ID фото
+warned_unauthorized_users = set() # Список, чтобы не спамить об одном и том же человеке
 
 # --- СОСТОЯНИЯ ---
 class BotStates(StatesGroup):
@@ -174,8 +177,6 @@ async def init_db():
                 );
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open';
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS closed_time TIMESTAMP;
-                
-                -- Добавляем колонки для решения старых конфликтов БД
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS action_time TIMESTAMP DEFAULT NOW();
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS admin_username TEXT;
                 
@@ -198,6 +199,39 @@ async def get_admin_role(user_id: int) -> str:
             row = await conn.fetchrow("SELECT role FROM admins WHERE user_id = $1;", user_id)
             return row["role"] if row else None
     except Exception: return None
+
+# --- СИСТЕМНАЯ СИГНАЛИЗАЦИЯ (ПРОВЕРКА АДМИН-ЧАТА) ---
+class SecurityMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[types.Message, Dict[str, Any]], Awaitable[Any]],
+        event: types.Message,
+        data: Dict[str, Any]
+    ) -> Any:
+        if isinstance(event, types.Message):
+            # Проверяем только сообщения в админ-чате от реальных людей
+            if event.chat.id == ADMIN_CHAT_ID and not event.from_user.is_bot:
+                user_id = event.from_user.id
+                role = await get_admin_role(user_id)
+                # Если роли нет и мы еще не предупреждали об этом человеке
+                if not role and user_id not in warned_unauthorized_users:
+                    warned_unauthorized_users.add(user_id)
+                    admin_mention = f"@{event.from_user.username}" if event.from_user.username else event.from_user.first_name
+                    try:
+                        await bot.send_message(
+                            chat_id=OWNER_ID,
+                            text=f"🚨 <b>Система безопасности!</b>\n"
+                                 f"В админ-чате написал пользователь без роли стажёра/админа!\n\n"
+                                 f"👤 Пользователь: {admin_mention}\n"
+                                 f"🆔 ID: <code>{user_id}</code>\n\n"
+                                 f"<i>Вы можете выдать ему роль (командой /setintern) или удалить из чата.</i>",
+                            parse_mode=ParseMode.HTML
+                        )
+                    except Exception as e:
+                        logger.error(f"Ошибка при отправке уведомления владельцу: {e}")
+        
+        return await handler(event, data)
+
 
 # --- ФОНОВАЯ РАССЫЛКА ЗАБОТЫ ---
 async def care_scheduler():
@@ -327,6 +361,7 @@ async def start_secret(callback: CallbackQuery, state: FSMContext):
 @dp.message(BotStates.waiting_for_secret)
 async def process_secret(message: types.Message, state: FSMContext):
     async with db_pool.acquire() as conn:
+        # Отправляем только тем, кто не заблокировал бота
         users = await conn.fetch("SELECT user_id FROM users WHERE user_id != $1 AND is_blocked = FALSE LIMIT 100;", message.from_user.id)
         if users:
             target = random.choice(users)['user_id']
@@ -760,6 +795,8 @@ async def main():
     try:
         await init_db()
         await bot.delete_webhook(drop_pending_updates=True)
+        # Регистрируем сигнализацию для админ-чата
+        dp.message.middleware(SecurityMiddleware())
         asyncio.create_task(care_scheduler())
         logger.info("Бот успешно запущен!")
         await dp.start_polling(bot)
