@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # --- НАСТРОЙКИ БОТА ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+# ID топика для неразобранных заявок и анонимок
 UNASSIGNED_TOPIC_ID = int(os.getenv("UNASSIGNED_TOPIC_ID", "765"))
 DB_DSN = os.getenv("DATABASE_URL")
 OWNER_ID = 8674242517 
@@ -31,9 +32,12 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool: asyncpg.Pool = None
 last_tech_message_id = None
+photo_id_mode = False # Переменная для вкл/выкл режима ID фото
 
 # --- СОСТОЯНИЯ ---
 class BotStates(StatesGroup):
+    waiting_for_broadcast_audience = State()
+    waiting_for_broadcast_n = State()
     waiting_for_broadcast = State()
     waiting_for_anon = State()
     waiting_for_secret = State()
@@ -170,6 +174,8 @@ async def init_db():
                 );
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open';
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS closed_time TIMESTAMP;
+                
+                -- Добавляем колонки для решения старых конфликтов БД
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS action_time TIMESTAMP DEFAULT NOW();
                 ALTER TABLE admin_actions ADD COLUMN IF NOT EXISTS admin_username TEXT;
                 
@@ -321,7 +327,6 @@ async def start_secret(callback: CallbackQuery, state: FSMContext):
 @dp.message(BotStates.waiting_for_secret)
 async def process_secret(message: types.Message, state: FSMContext):
     async with db_pool.acquire() as conn:
-        # Отправляем только тем, кто не заблокировал бота
         users = await conn.fetch("SELECT user_id FROM users WHERE user_id != $1 AND is_blocked = FALSE LIMIT 100;", message.from_user.id)
         if users:
             target = random.choice(users)['user_id']
@@ -334,6 +339,22 @@ async def process_secret(message: types.Message, state: FSMContext):
     await state.clear()
 
 # --- СИСТЕМА АДМИНИСТРАТОРОВ И ТИКЕТОВ ---
+
+# Переключатель ID фото
+@dp.message(Command("photoid"), F.from_user.id == OWNER_ID)
+async def cmd_toggle_photoid(message: types.Message):
+    global photo_id_mode
+    photo_id_mode = not photo_id_mode
+    state_text = "ВКЛЮЧЕН 🟢" if photo_id_mode else "ВЫКЛЮЧЕН 🔴"
+    await message.answer(f"📸 Режим получения ID фото: <b>{state_text}</b>\nТеперь бот {'будет' if photo_id_mode else 'не будет'} реагировать на отправленные картинки.", parse_mode=ParseMode.HTML)
+
+@dp.message(F.photo, F.from_user.id == OWNER_ID)
+async def get_photo_id(message: types.Message):
+    if not photo_id_mode: 
+        return
+    photo_id = message.photo[-1].file_id
+    await message.answer(f"📸 <b>ID вашей картинки:</b>\n\n<code>{photo_id}</code>", parse_mode=ParseMode.HTML)
+
 @dp.message(Command("help"))
 @dp.message(F.text.lower().in_({".help", "/хелп", ".хелп"}))
 async def cmd_help(message: types.Message):
@@ -347,7 +368,8 @@ async def cmd_help(message: types.Message):
         "├ /adminlist — Список состава\n"
         "├ /check — Проверить пользователя (ответом)\n"
         "├ /id — Узнать ID пользователя (ответом)\n"
-        "└ /broadcast — Сделать рассылку пользователям\n\n"
+        "├ /broadcast — Сделать рассылку пользователям\n"
+        "└ /photoid — Вкл/Выкл получение ID картинок (Только Владелец)\n\n"
         "🛡 <b>Роли и Дисциплина:</b>\n"
         "├ /setdirector [ID] — Назначить директора\n"
         "├ /setadmin [ID] — Назначить администратора\n"
@@ -554,24 +576,59 @@ async def cmd_unwarn(message: types.Message):
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message, state: FSMContext):
     if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Всем пользователям", callback_data="bc_all")],
+        [InlineKeyboardButton(text="🔥 Самым активным (Топ 50)", callback_data="bc_active")],
+        [InlineKeyboardButton(text="☀️ Самым теплым (Топ 50)", callback_data="bc_warm")],
+        [InlineKeyboardButton(text="🔢 Каждому N-ому", callback_data="bc_nth")]
+    ])
+    await message.answer("📢 <b>Настройка рассылки</b>\nВыберите, кому отправить сообщение:", reply_markup=kb, parse_mode=ParseMode.HTML)
+    await state.set_state(BotStates.waiting_for_broadcast_audience)
+
+@dp.callback_query(F.data.startswith("bc_"), BotStates.waiting_for_broadcast_audience)
+async def process_bc_audience(callback: CallbackQuery, state: FSMContext):
+    audience = callback.data.split("_")[1]
+    await state.update_data(audience=audience)
+    
+    if audience == "nth":
+        await callback.message.edit_text("🔢 Введите число N (например, 5 — отправит каждому пятому):")
+        await state.set_state(BotStates.waiting_for_broadcast_n)
+    else:
+        await callback.message.edit_text("📢 Отправьте сообщение (текст, фото, видео) для рассылки:")
+        await state.set_state(BotStates.waiting_for_broadcast)
+
+@dp.message(BotStates.waiting_for_broadcast_n)
+async def process_bc_n(message: types.Message, state: FSMContext):
+    if not message.text.isdigit() or int(message.text) < 2:
+        return await message.answer("⚠️ Пожалуйста, введите число (больше 1).")
+    await state.update_data(nth=int(message.text))
     await message.answer("📢 Отправьте сообщение для рассылки:")
     await state.set_state(BotStates.waiting_for_broadcast)
 
 @dp.message(BotStates.waiting_for_broadcast)
 async def process_broadcast(message: types.Message, state: FSMContext):
-    async with db_pool.acquire() as conn: 
-        users = await conn.fetch("SELECT user_id FROM users;")
+    data = await state.get_data()
+    audience, nth = data.get("audience"), data.get("nth", 1)
     
-    success = 0
-    blocked = 0
-    status_msg = await message.answer("⏳ Рассылка началась...")
+    async with db_pool.acquire() as conn: 
+        if audience in ["all", "nth"]:
+            users = await conn.fetch("SELECT user_id FROM users WHERE is_blocked = FALSE;")
+        elif audience == "active":
+            users = await conn.fetch("SELECT user_id FROM users WHERE is_blocked = FALSE ORDER BY msg_count DESC LIMIT 50;")
+        elif audience == "warm":
+            users = await conn.fetch("SELECT user_id FROM users WHERE is_blocked = FALSE ORDER BY warmth DESC LIMIT 50;")
+            
+    if audience == "nth": users = users[::nth]
+    
+    success, blocked = 0, 0
+    status_msg = await message.answer(f"⏳ <b>Рассылка началась...</b>\nЦелевая аудитория: {len(users)} чел.", parse_mode=ParseMode.HTML)
     
     async with db_pool.acquire() as conn:
         for u in users:
             try:
                 await message.send_copy(chat_id=u["user_id"])
                 success += 1
-                await conn.execute("UPDATE users SET is_blocked = FALSE WHERE user_id = $1;", u["user_id"])
                 await asyncio.sleep(0.05)
             except Exception as e:
                 err_text = str(e).lower()
