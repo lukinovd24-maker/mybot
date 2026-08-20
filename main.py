@@ -272,6 +272,80 @@ async def care_scheduler():
             await asyncio.sleep(60)
         await asyncio.sleep(30)
 
+
+# --- ИНТЕГРАЦИЯ С TELEGRAM BUSINESS ---
+
+profiled_biz_users = set() # Память, чтобы бот не спамил досье на каждое сообщение
+
+@dp.business_message(Command("search"))
+@dp.business_message(F.text.lower() == "/search")
+async def biz_search_command(message: types.Message):
+    if message.from_user.id != OWNER_ID:
+        return
+        
+    target_id = message.chat.id
+    
+    async with db_pool.acquire() as conn:
+        user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked FROM users WHERE user_id = $1;", target_id)
+        
+    if not user_data:
+        await bot.send_message(OWNER_ID, f"❌ Бизнес-поиск: Пользователь с ID <code>{target_id}</code> не найден в базе.", parse_mode=ParseMode.HTML)
+        return
+        
+    has_ticket = "Да (топик открыт)" if user_data["topic_id"] else "Нет активных тикетов"
+    is_blocked = "🚫 Да" if user_data["is_blocked"] else "🍏 Нет"
+    username_text = f"@{user_data['username']}" if user_data['username'] else "Скрыт"
+    
+    info_text = (
+        f"💼 <b>Бизнес-проверка:</b>\n"
+        f"├ Имя: {user_data['first_name']}\n"
+        f"├ Юзернейм: {username_text}\n"
+        f"├ ID: <code>{user_data['user_id']}</code>\n"
+        f"├ Бот заблокирован: {is_blocked}\n"
+        f"└ Тикет: {has_ticket}"
+    )
+    
+    await bot.send_message(OWNER_ID, info_text, parse_mode=ParseMode.HTML)
+
+# АВТОМАТИЧЕСКАЯ ПРОВЕРКА НОВЫХ ЛС (Бизнес-режим)
+@dp.business_message(F.chat.type == "private")
+async def auto_biz_profile(message: types.Message):
+    if message.from_user.id == OWNER_ID:
+        return
+        
+    target_id = message.from_user.id
+    
+    if target_id in profiled_biz_users:
+        return
+        
+    profiled_biz_users.add(target_id)
+    
+    async with db_pool.acquire() as conn:
+        user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked FROM users WHERE user_id = $1;", target_id)
+        
+    if not user_data:
+        return
+        
+    has_ticket = "Да (топик открыт)" if user_data["topic_id"] else "Нет активных тикетов"
+    is_blocked = "🚫 Да" if user_data["is_blocked"] else "🍏 Нет"
+    username_text = f"@{user_data['username']}" if user_data['username'] else "Скрыт"
+    
+    info_text = (
+        f"🔔 <b>Вам в ЛС написал пользователь бота!</b>\n"
+        f"├ Имя: {user_data['first_name']}\n"
+        f"├ Юзернейм: {username_text}\n"
+        f"├ ID: <code>{user_data['user_id']}</code>\n"
+        f"├ Бот заблокирован: {is_blocked}\n"
+        f"└ Тикет: {has_ticket}\n\n"
+        f"<i>(Это автоматическая проверка новых диалогов)</i>"
+    )
+    
+    try:
+        await bot.send_message(OWNER_ID, info_text, parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+
+
 # --- МЕНЮ ПОЛЬЗОВАТЕЛЯ И ФИШКИ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -396,41 +470,10 @@ async def process_secret(message: types.Message, state: FSMContext):
 
 # --- СИСТЕМА АДМИНИСТРАТОРОВ И ТИКЕТОВ ---
 
-# --- ИНТЕГРАЦИЯ С TELEGRAM BUSINESS ---
-@dp.business_message(Command("search"))
-@dp.business_message(F.text.lower() == "/search")
-async def biz_search_command(message: types.Message):
-    if message.from_user.id != OWNER_ID:
-        return
-        
-    target_id = message.chat.id
-    
-    async with db_pool.acquire() as conn:
-        user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked FROM users WHERE user_id = $1;", target_id)
-        
-    if not user_data:
-        await bot.send_message(OWNER_ID, f"❌ Бизнес-поиск: Пользователь с ID <code>{target_id}</code> не найден в базе.", parse_mode=ParseMode.HTML)
-        return
-        
-    has_ticket = "Да (топик открыт)" if user_data["topic_id"] else "Нет активных тикетов"
-    is_blocked = "🚫 Да" if user_data["is_blocked"] else "🍏 Нет"
-    username_text = f"@{user_data['username']}" if user_data['username'] else "Скрыт"
-    
-    info_text = (
-        f"💼 <b>Бизнес-проверка:</b>\n"
-        f"├ Имя: {user_data['first_name']}\n"
-        f"├ Юзернейм: {username_text}\n"
-        f"├ ID: <code>{user_data['user_id']}</code>\n"
-        f"├ Бот заблокирован: {is_blocked}\n"
-        f"└ Тикет: {has_ticket}"
-    )
-    
-    # Отправляем инфу в личку с ботом, чтобы собеседник этого не увидел!
-    await bot.send_message(OWNER_ID, info_text, parse_mode=ParseMode.HTML)
-
-
 @dp.message(Command("photoid"), F.from_user.id == OWNER_ID)
 async def cmd_toggle_photoid(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
     global photo_id_mode
     photo_id_mode = not photo_id_mode
     state_text = "ВКЛЮЧЕН 🟢" if photo_id_mode else "ВЫКЛЮЧЕН 🔴"
@@ -446,6 +489,8 @@ async def get_photo_id(message: types.Message):
 @dp.message(Command("help"))
 @dp.message(F.text.lower().in_({".help", "/хелп", ".хелп"}))
 async def cmd_help(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
     role = await get_admin_role(message.from_user.id)
     if not role: return await message.answer("❌ У вас нет доступа к командам администратора.")
     help_text = (
@@ -476,6 +521,8 @@ async def cmd_help(message: types.Message):
 @dp.message(Command("id"))
 @dp.message(F.text.lower().in_({".ид", "/id"}))
 async def cmd_id(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
     target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
     await message.answer(
         f"🆔 <b>Информация:</b>\n├ Имя: {target.first_name}\n├ Юзернейм: @{target.username}\n└ ID: <code>{target.id}</code>",
@@ -485,6 +532,8 @@ async def cmd_id(message: types.Message):
 @dp.message(Command("check"))
 @dp.message(F.text.lower().in_({".чек", "/check"}))
 async def cmd_check(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
     if not await get_admin_role(message.from_user.id): return await message.answer("❌ У вас нет прав.")
     
     args = message.text.split()
@@ -530,6 +579,8 @@ async def cmd_check(message: types.Message):
 @dp.message(Command("adminlist"))
 @dp.message(F.text.lower().in_({".админы", "/adminlist"}))
 async def cmd_adminlist(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
     if not await get_admin_role(message.from_user.id): return
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id, username, role, tag, warns FROM admins ORDER BY role;")
@@ -540,6 +591,8 @@ async def cmd_adminlist(message: types.Message):
 @dp.message(Command("adminstats"))
 @dp.message(F.text.lower().in_({".астат", "/adminstats"}))
 async def cmd_admin_stats(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
     if await get_admin_role(message.from_user.id) not in ['owner', 'director']: 
         return await message.answer("❌ Недостаточно прав для просмотра этой статистики.")
     async with db_pool.acquire() as conn:
@@ -579,6 +632,8 @@ async def cmd_admin_stats(message: types.Message):
 @dp.message(Command("stats"))
 @dp.message(F.text.lower().in_({".стат", "/stats"}))
 async def cmd_stats(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
     if not await get_admin_role(message.from_user.id): return
     
     async with db_pool.acquire() as conn:
@@ -620,6 +675,8 @@ async def cmd_stats(message: types.Message):
 
 @dp.message(F.text.in_({"пост 1", "пост 2", "пост 3", "пост 4", "пост 5", "пост 6"}), F.from_user.id == OWNER_ID)
 async def send_custom_template_post(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
     global last_tech_message_id
     try:
         key = message.text.split()[-1]
@@ -698,6 +755,8 @@ async def cmd_unwarn(message: types.Message):
 
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message, state: FSMContext):
+    try: await message.delete()
+    except Exception: pass
     if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
