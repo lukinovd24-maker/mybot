@@ -32,9 +32,12 @@ TZ = timezone(timedelta(hours=5))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool: asyncpg.Pool = None
+
+# Глобальные переменные
 last_tech_message_id = None
 photo_id_mode = False 
 warned_unauthorized_users = set()
+profiled_biz_users = set()
 
 # --- СОСТОЯНИЯ ---
 class BotStates(StatesGroup):
@@ -54,10 +57,7 @@ QUOTES = [
     "Самые красивые закаты бывают после самых тяжелых дней.",
     "Твой внутренний свет способен согреть даже самый холодный вечер. 🕯",
     "Ошибаться — нормально. Завтра будет новый день и новая попытка.",
-    "Маленькие шаги — это тоже прогресс. Не торопи себя.",
-    "Уют кроется в мелочах: в горячем чае, тихой музыке и спокойных мыслях. ☕️",
-    "Ты заслуживаешь всей той любви и заботы, которую так щедро даришь другим.",
-    "Пусть этот вечер принесет тебе только спокойствие и теплые мысли. 🌙"
+    "Уют кроется в мелочах: в горячем чае, тихой музыке и спокойных мыслях. ☕️"
 ]
 
 HUGS = [
@@ -65,12 +65,8 @@ HUGS = [
     "Посылаю тебе виртуальный плед и кружку горячего какао ☕️ Укутывайся и отдыхай!",
     "Эй, солнышко! Ты огромный молодец. Горжусь тем, как ты справляешься со всем этим. 🫂",
     "Если день был тяжелым, помни, что теперь он закончился. Завтра будет легче. *Теплые обнимашки* 🌙",
-    "Иногда лучшая продуктивность — это просто позволить себе полежать. Ты в безопасности, расслабься. ✨",
     "Лови тысячу лучей поддержки! Ты не один, мы рядом. ☀️",
-    "*Гладит по голове* Ты стараешься, и это самое главное. Отдохни сегодня как следует.",
-    "Давай вместе сделаем вдох... и выдох. Всё наладится, вот увидишь! 🫂",
-    "Я хоть и бот, но отправляю тебе самые искренние и теплые объятия! ❤️",
-    "Ты чудесный человек, и всё обязательно сложится самым лучшим образом. Не грусти! 🌸"
+    "*Гладит по голове* Ты стараешься, и это самое главное. Отдохни сегодня как следует."
 ]
 
 FILMS = [
@@ -78,12 +74,7 @@ FILMS = [
     "Шепот сердца (1995) 🎻 — Вдохновляющее аниме о поиске себя, творчестве и любви.",
     "Твое имя (2016) 🌠 — Невероятно красивая история о связи сквозь время и расстояние.",
     "Маленькие женщины (2019) 📖 — Теплый, осенний и очень душевный фильм о семье и мечтах.",
-    "Паддингтон (2014) 🐻 — Максимально доброе и милое кино, которое гарантированно заставит улыбнуться.",
-    "Невероятная жизнь Уолтера Митти (2013) 🏔 — Визуальный шедевр, который вдохновляет мечтать и действовать.",
-    "Амели (2001) ☕️ — Чудаковатая, но очень светлая французская классика о маленьких радостях жизни.",
-    "Коралина в Стране Кошмаров (2009) 🗝 — Слегка жутковатая, но безумно атмосферная кукольная анимация.",
-    "Судзумэ, закрывающая двери (2022) 🚪 — Красиво, трогательно и с глубоким смыслом. Визуал на высоте!",
-    "Патэма наоборот (2013) 🌌 — Очень необычное аниме, которое переворачивает мир с ног на голову."
+    "Амели (2001) ☕️ — Чудаковатая, но очень светлая французская классика о маленьких радостях жизни."
 ]
 
 MUSIC = [
@@ -91,44 +82,27 @@ MUSIC = [
     "The Neighbourhood - Sweater Weather 🌧 — Настоящая осенне-вечерняя классика.",
     "Сироткин - Выше домов 🌇 — Очень светлая, теплая и атмосферная русскоязычная инди-песня.",
     "Joji - Glimpse of Us 🎹 — Меланхоличная, немного грустная, но невероятно красивая.",
-    "in love with a ghost - we've never met but can we have a cup of coffee or something ☕️ — Название говорит само за себя!",
-    "Coldplay - Yellow 🌟 — Песня, которая звучит и ощущается как теплые дружеские объятия.",
-    "Mac DeMarco - Chamber Of Reflection 🪞 — Легкий гипнотический ретро-вайб для ночных раздумий.",
-    "Aurora - Runaway 🌲 — Магический, эльфийский вокал, уносящий далеко в лес от забот.",
-    "d4vd - Romantic Homicide 🥀 — Современная эстетика, немного мрачная, но завораживающая.",
-    "Lamp - Yume Utsutsu 🏮 — Японский лаунж, безумно уютный и расслабляющий. Как теплый свет фонаря."
+    "Coldplay - Yellow 🌟 — Песня, которая звучит и ощущается как теплые дружеские объятия."
 ]
 
 FAQ_TEXT = (
     "ℹ️ <b>Ответы на частые вопросы (FAQ):</b>\n\n"
     "<b>1. Как стать частью вашей команды (админом)?</b>\n"
-    "— Время от времени мы открываем набор стажёров. Вся информация и анкеты публикуются в нашем основном канале @eve_ning_glow. Внимательно следите за новостями! ✨\n\n"
+    "— Время от времени мы открываем набор стажёров. Вся информация и анкеты публикуются в нашем основном канале @eve_ning_glow.\n\n"
     "<b>2. Как долго ждать ответа от поддержки?</b>\n"
-    "— Наши админы — такие же люди, у них есть учеба и личные дела. Обычно мы отвечаем в течение 1-2 часов. Пожалуйста, не переживайте и не дублируйте сообщения, мы обязательно увидим ваш тикет! 🫂\n\n"
+    "— Наши админы — такие же люди. Обычно мы отвечаем в течение 1-2 часов. Пожалуйста, не переживайте и не дублируйте сообщения! 🫂\n\n"
     "<b>3. Для чего вообще нужен этот бот?</b>\n"
-    "— Здесь вы можете задать вопрос администрации, предложить идею для постов (даже анонимно!), отправить теплое послание тайному другу или просто получить порцию уюта, если вам грустно. ☕️\n\n"
-    "<b>4. Делаете ли вы ВП (взаимопиар) и сотрудничество?</b>\n"
-    "— Да! Мы открыты к сотрудничеству. Ознакомиться с условиями можно <a href='https://t.me/eve_ning_glow/445'>в этом посте (Условия ВП)</a>. Если ваш канал подходит, пишите сообщение прямо в этого бота!\n\n"
-    "<b>5. Где найти правила вашего комьюнити?</b>\n"
-    "— Чтобы всем было комфортно, у нас есть правила. Обязательно прочитайте их тут: <a href='https://t.me/eve_ning_glow/444'>Правила Вечернего сияния</a>.\n\n"
-    "<i>Остались вопросы? Просто напишите их следующим сообщением, и первый освободившийся админ с радостью вам ответит!</i> 🌙"
+    "— Здесь вы можете задать вопрос администрации, предложить идею для постов (даже анонимно!) или получить поддержку. ☕️\n\n"
+    "<i>Остались вопросы? Просто напишите их следующим сообщением!</i> 🌙"
 )
 
 RULES_TEXT = (
     "📜 <b>Правила нашего уютного уголка:</b>\n\n"
-    "Добро пожаловать в «Вечернее сияние»! ✨ Чтобы всем здесь было комфортно и тепло, мы просим соблюдать несколько простых правил:\n\n"
-    "<b>1. Взаимоуважение — прежде всего 🫂</b>\n"
-    "Относитесь к администраторам и другим участникам (в тайных письмах) с добром. Любые оскорбления, токсичность, буллинг и агрессия строго запрещены.\n\n"
-    "<b>2. Терпение — добродетель 🕰</b>\n"
-    "Пожалуйста, не спамьте сообщениями вроде «Ау», «Вы тут?», «Ответьте». Как только вы написали, у нас создался тикет. Админы ответят вам, как только освободятся!\n\n"
-    "<b>3. Добро в «Анонимке» и «Тайном друге» 💌</b>\n"
-    "Эти функции созданы для того, чтобы делиться теплом, поддержкой и крутыми идеями. Использование их для оскорблений или травли приведет к перманентному бану.\n\n"
-    "<b>4. Никакого шок-контента и 18+ 🔞</b>\n"
-    "Запрещена отправка любых материалов порнографического характера, жестокости или того, что может травмировать других людей.\n\n"
-    "<b>5. Реклама и спам 🚫</b>\n"
-    "Не присылайте нам спам-рассылки. Если вы хотите предложить Взаимопиар (ВП) или сотрудничество — напишите об этом сразу, вежливо и по делу.\n\n"
-    "<i>⚠️ За нарушение этих правил администрация оставляет за собой право ограничить ваш доступ к боту навсегда.</i>\n"
-    "Спасибо, что делаете «Вечернее сияние» самым светлым местом в Telegram! 🌙"
+    "<b>1. Взаимоуважение — прежде всего 🫂</b>\nЛюбые оскорбления, буллинг и агрессия строго запрещены.\n\n"
+    "<b>2. Терпение — добродетель 🕰</b>\nПожалуйста, не спамьте сообщениями вроде «Ау», «Вы тут?». Админы ответят вам, как только освободятся!\n\n"
+    "<b>3. Никакого шок-контента и 18+ 🔞</b>\nЗапрещена отправка материалов порнографического или жестокого характера.\n\n"
+    "<i>⚠️ За нарушение этих правил мы можем ограничить ваш доступ к боту навсегда.</i>\n"
+    "Спасибо, что делаете «Вечернее сияние» светлым местом! 🌙"
 )
 
 POST_TEMPLATES = {
@@ -157,6 +131,7 @@ async def init_db():
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS join_date TIMESTAMP DEFAULT NOW();
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS care_sub BOOLEAN DEFAULT FALSE;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;
 
                 CREATE TABLE IF NOT EXISTS admins (
                     user_id BIGINT PRIMARY KEY, username TEXT, role TEXT, tag TEXT,
@@ -225,7 +200,6 @@ class SecurityMiddleware(BaseMiddleware):
                         )
                     except Exception as e:
                         logger.error(f"Ошибка при отправке уведомления владельцу: {e}")
-        
         return await handler(event, data)
 
 # --- РАДАР НОВЫХ ЛИЦ В ЧАТЕ ---
@@ -262,7 +236,7 @@ async def care_scheduler():
         now = datetime.now(TZ)
         if now.hour == 21 and now.minute == 0:
             async with db_pool.acquire() as conn:
-                users = await conn.fetch("SELECT user_id FROM users WHERE care_sub = TRUE AND is_blocked = FALSE;")
+                users = await conn.fetch("SELECT user_id FROM users WHERE care_sub = TRUE AND is_blocked = FALSE AND is_banned = FALSE;")
             text = "🌙 Вечернее Сияние напоминает: этот день позади. Выпей чаю, включи любимую музыку и отдохни. Ты молодец! ❤️"
             for u in users:
                 try:
@@ -274,19 +248,14 @@ async def care_scheduler():
 
 
 # --- ИНТЕГРАЦИЯ С TELEGRAM BUSINESS ---
-
-profiled_biz_users = set() # Память, чтобы бот не спамил досье на каждое сообщение
-
 @dp.business_message(Command("search"))
 @dp.business_message(F.text.lower() == "/search")
 async def biz_search_command(message: types.Message):
-    if message.from_user.id != OWNER_ID:
-        return
-        
+    if message.from_user.id != OWNER_ID: return
     target_id = message.chat.id
     
     async with db_pool.acquire() as conn:
-        user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked FROM users WHERE user_id = $1;", target_id)
+        user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked, is_banned FROM users WHERE user_id = $1;", target_id)
         
     if not user_data:
         await bot.send_message(OWNER_ID, f"❌ Бизнес-поиск: Пользователь с ID <code>{target_id}</code> не найден в базе.", parse_mode=ParseMode.HTML)
@@ -294,6 +263,7 @@ async def biz_search_command(message: types.Message):
         
     has_ticket = "Да (топик открыт)" if user_data["topic_id"] else "Нет активных тикетов"
     is_blocked = "🚫 Да" if user_data["is_blocked"] else "🍏 Нет"
+    is_banned = "🔴 ЗАБАНЕН" if user_data["is_banned"] else "🟢 Чист"
     username_text = f"@{user_data['username']}" if user_data['username'] else "Скрыт"
     
     info_text = (
@@ -302,32 +272,27 @@ async def biz_search_command(message: types.Message):
         f"├ Юзернейм: {username_text}\n"
         f"├ ID: <code>{user_data['user_id']}</code>\n"
         f"├ Бот заблокирован: {is_blocked}\n"
+        f"├ Статус в боте: {is_banned}\n"
         f"└ Тикет: {has_ticket}"
     )
-    
     await bot.send_message(OWNER_ID, info_text, parse_mode=ParseMode.HTML)
 
-# АВТОМАТИЧЕСКАЯ ПРОВЕРКА НОВЫХ ЛС (Бизнес-режим)
 @dp.business_message(F.chat.type == "private")
 async def auto_biz_profile(message: types.Message):
-    if message.from_user.id == OWNER_ID:
-        return
-        
+    if message.from_user.id == OWNER_ID: return
     target_id = message.from_user.id
-    
-    if target_id in profiled_biz_users:
-        return
+    if target_id in profiled_biz_users: return
         
     profiled_biz_users.add(target_id)
     
     async with db_pool.acquire() as conn:
-        user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked FROM users WHERE user_id = $1;", target_id)
+        user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked, is_banned FROM users WHERE user_id = $1;", target_id)
         
-    if not user_data:
-        return
+    if not user_data: return
         
     has_ticket = "Да (топик открыт)" if user_data["topic_id"] else "Нет активных тикетов"
     is_blocked = "🚫 Да" if user_data["is_blocked"] else "🍏 Нет"
+    is_banned = "🔴 ЗАБАНЕН" if user_data["is_banned"] else "🟢 Чист"
     username_text = f"@{user_data['username']}" if user_data['username'] else "Скрыт"
     
     info_text = (
@@ -336,14 +301,12 @@ async def auto_biz_profile(message: types.Message):
         f"├ Юзернейм: {username_text}\n"
         f"├ ID: <code>{user_data['user_id']}</code>\n"
         f"├ Бот заблокирован: {is_blocked}\n"
+        f"├ Статус: {is_banned}\n"
         f"└ Тикет: {has_ticket}\n\n"
         f"<i>(Это автоматическая проверка новых диалогов)</i>"
     )
-    
-    try:
-        await bot.send_message(OWNER_ID, info_text, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
+    try: await bot.send_message(OWNER_ID, info_text, parse_mode=ParseMode.HTML)
+    except Exception: pass
 
 
 # --- МЕНЮ ПОЛЬЗОВАТЕЛЯ И ФИШКИ ---
@@ -377,10 +340,6 @@ async def process_category(callback: CallbackQuery):
     elif callback.data == "cat_question":
         await callback.message.answer("📝 Напиши свой вопрос следующим сообщением, и мы передадим его админам!")
     await callback.answer()
-
-@dp.message(Command("rules"))
-async def cmd_rules(message: types.Message):
-    await message.answer(RULES_TEXT, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("profile"))
 async def cmd_profile(message: types.Message):
@@ -424,12 +383,6 @@ async def cmd_coffee(message: types.Message): await message.answer("Вот тв�
 @dp.message(Command("quote"))
 async def cmd_quote(message: types.Message): await message.answer(f"<i>«{random.choice(QUOTES)}»</i>", parse_mode=ParseMode.HTML)
 
-@dp.message(Command("music"))
-async def cmd_music(message: types.Message): await message.answer(f"🎧 Рекомендация на вечер: <b>{random.choice(MUSIC)}</b>", parse_mode=ParseMode.HTML)
-
-@dp.message(Command("film"))
-async def cmd_film(message: types.Message): await message.answer(f"🎬 Фильм на вечер: <b>{random.choice(FILMS)}</b>", parse_mode=ParseMode.HTML)
-
 # --- АНОНИМКА И ТАЙНЫЙ ДРУГ ---
 @dp.callback_query(F.data == "anon_suggest")
 async def start_anon(callback: CallbackQuery, state: FSMContext):
@@ -439,36 +392,146 @@ async def start_anon(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(BotStates.waiting_for_anon)
 async def process_anon(message: types.Message, state: FSMContext):
-    await bot.send_message(
-        ADMIN_CHAT_ID, 
-        f"🎭 <b>АНОНИМНАЯ ПРЕДЛОЖКА:</b>\n\n{message.text}", 
-        parse_mode=ParseMode.HTML, 
-        message_thread_id=UNASSIGNED_TOPIC_ID
-    )
+    # Копируем сообщение целиком, чтобы Premium-эмодзи и стикеры работали!
+    sent_msg = await message.send_copy(chat_id=ADMIN_CHAT_ID, message_thread_id=UNASSIGNED_TOPIC_ID)
+    await bot.send_message(ADMIN_CHAT_ID, "👆 <b>АНОНИМНАЯ ПРЕДЛОЖКА</b>", reply_to_message_id=sent_msg.message_id, message_thread_id=UNASSIGNED_TOPIC_ID, parse_mode=ParseMode.HTML)
     await message.answer("✅ Отправлено анонимно! Спасибо за твою идею.")
     await state.clear()
 
-@dp.callback_query(F.data == "secret_friend")
-async def start_secret(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("💌 Напиши доброе послание. Я отправлю его случайному пользователю бота от Тайного Друга, а ты получишь +1 к теплу!")
-    await state.set_state(BotStates.waiting_for_secret)
-    await callback.answer()
-
-@dp.message(BotStates.waiting_for_secret)
-async def process_secret(message: types.Message, state: FSMContext):
-    async with db_pool.acquire() as conn:
-        users = await conn.fetch("SELECT user_id FROM users WHERE user_id != $1 AND is_blocked = FALSE LIMIT 100;", message.from_user.id)
-        if users:
-            target = random.choice(users)['user_id']
-            try:
-                await bot.send_message(target, f"💌 <b>Вам письмо от Тайного Друга!</b>\n\n<i>{message.text}</i>", parse_mode=ParseMode.HTML)
-                await conn.execute("UPDATE users SET warmth = warmth + 1 WHERE user_id = $1;", message.from_user.id)
-                await message.answer("✅ Твое письмо отправлено кому-то случайному! Уровень тепла +1 ☀️")
-            except Exception:
-                await message.answer("❌ Упс, птичка с письмом заблудилась. Попробуй позже.")
-    await state.clear()
 
 # --- СИСТЕМА АДМИНИСТРАТОРОВ И ТИКЕТОВ ---
+
+# Memory-based Карточка (check_use)
+@dp.message(Command("check_use"))
+@dp.message(Command("use"))
+async def cmd_check_use(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
+    if not await get_admin_role(message.from_user.id): return
+    
+    args = message.text.split()
+    if len(args) < 2 and not message.reply_to_message:
+        return await message.answer("⚠️ Используй: <code>/use ID</code> или <code>/use @username</code> (или ответом)", parse_mode=ParseMode.HTML)
+        
+    target_id, target_username = None, None
+    if message.reply_to_message:
+        target_id = message.reply_to_message.from_user.id
+    else:
+        arg = args[1]
+        if arg.isdigit(): target_id = int(arg)
+        else: target_username = arg.replace("@", "")
+
+    async with db_pool.acquire() as conn:
+        if target_id:
+            u = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1;", target_id)
+        else:
+            u = await conn.fetchrow("SELECT * FROM users WHERE username ILIKE $1;", target_username)
+            
+    # Красивая обложка для досье (эстетичный арт)
+    dossier_image = "https://i.pinimg.com/736x/8d/6a/c7/8d6ac72f122851a707166164f26b5de2.jpg"
+
+    if not u:
+        await message.answer_photo(
+            photo=dossier_image,
+            caption="🗃 <b>MEMORY-BASED SYSTEM</b>\n\n"
+                    "❌ <b>Статус:</b> Человек не найден в базе данных.\n"
+                    "🛡 <b>Жалобы:</b> 0 (Чист)\n"
+                    "🎭 <b>Роль в составе:</b> Отсутствует",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    admin_role = await get_admin_role(u['user_id'])
+    role_text = admin_role.capitalize() if admin_role else "Пользователь"
+    ban_text = "🔴 ЗАБЛОКИРОВАН" if u['is_banned'] else "🟢 Чист"
+    
+    await message.answer_photo(
+        photo=dossier_image,
+        caption=f"🗃 <b>MEMORY-BASED SYSTEM</b>\n\n"
+                f"👤 <b>Имя:</b> {u['first_name']}\n"
+                f"🆔 <b>ID:</b> <code>{u['user_id']}</code>\n"
+                f"⚠️ <b>Статус:</b> {ban_text}\n"
+                f"💬 <b>Сообщений в бот:</b> {u['msg_count']}\n"
+                f"🎭 <b>Роль в составе:</b> {role_text}",
+        parse_mode=ParseMode.HTML
+    )
+
+# Система Банов (/ban)
+@dp.message(Command("ban"), F.chat.id == ADMIN_CHAT_ID)
+async def cmd_ban(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
+    
+    topic_id = message.message_thread_id
+    if not topic_id or topic_id == UNASSIGNED_TOPIC_ID: return
+    
+    admin_id = message.from_user.id
+    admin_role = await get_admin_role(admin_id)
+    if not admin_role: return
+    
+    async with db_pool.acquire() as conn:
+        user_row = await conn.fetchrow("SELECT user_id FROM users WHERE topic_id = $1;", topic_id)
+        if not user_row: return
+        target_user_id = user_row["user_id"]
+
+        # Если стажёр - отправляем запрос куратору
+        if admin_role == 'intern':
+            admin_data = await conn.fetchrow("SELECT curator_id FROM admins WHERE user_id = $1;", admin_id)
+            curator_id = admin_data['curator_id'] if admin_data else None
+            
+            if not curator_id:
+                return await message.answer("⚠️ За вами не закреплен куратор! Вы не можете запрашивать блокировку.")
+                
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Одобрить бан", callback_data=f"approve_ban_{target_user_id}_{topic_id}")],
+                [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_ban_{target_user_id}_{topic_id}")]
+            ])
+            try:
+                chat_id_str = str(ADMIN_CHAT_ID).replace("-100", "")
+                topic_link = f"https://t.me/c/{chat_id_str}/{topic_id}"
+                await bot.send_message(
+                    curator_id,
+                    f"🚨 <b>Запрос на блокировку от стажёра!</b>\n"
+                    f"Стажёр @{message.from_user.username} хочет забанить пользователя <code>{target_user_id}</code>.\n\n"
+                    f"🔗 <a href='{topic_link}'>Перейти в топик для проверки</a>",
+                    reply_markup=kb, parse_mode=ParseMode.HTML
+                )
+                await message.answer("⏳ Запрос на блокировку отправлен вашему куратору.")
+            except Exception:
+                await message.answer("❌ Ошибка отправки запроса куратору.")
+            return
+
+        # Если это админ/директор/владелец - баним сразу
+        await conn.execute("UPDATE users SET is_banned = TRUE, topic_id = NULL WHERE user_id = $1;", target_user_id)
+        await conn.execute("UPDATE admin_actions SET status = 'closed', closed_time = NOW() WHERE target_user_id = $1 AND status = 'open';", target_user_id)
+        
+    await message.answer("🔨 <b>Пользователь заблокирован навсегда!</b> Топик можно закрывать.", parse_mode=ParseMode.HTML)
+    try: await bot.send_message(target_user_id, "🚫 <b>Вы были заблокированы администрацией бота.</b>", parse_mode=ParseMode.HTML)
+    except Exception: pass
+    try: await bot.close_forum_topic(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id)
+    except Exception: pass
+
+# Обработка ответов куратора на бан
+@dp.callback_query(F.data.startswith("approve_ban_") | F.data.startswith("reject_ban_"))
+async def process_ban_approval(callback: CallbackQuery):
+    action, _, target_user_id, topic_id = callback.data.split("_")
+    target_user_id, topic_id = int(target_user_id), int(topic_id)
+    
+    if action == "approve":
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET is_banned = TRUE, topic_id = NULL WHERE user_id = $1;", target_user_id)
+            await conn.execute("UPDATE admin_actions SET status = 'closed', closed_time = NOW() WHERE target_user_id = $1 AND status = 'open';", target_user_id)
+        
+        await callback.message.edit_text("✅ <b>Бан одобрен.</b> Пользователь заблокирован.", parse_mode=ParseMode.HTML)
+        await bot.send_message(ADMIN_CHAT_ID, "✅ <b>Куратор одобрил бан.</b> Пользователь заблокирован.", message_thread_id=topic_id, parse_mode=ParseMode.HTML)
+        try: await bot.send_message(target_user_id, "🚫 <b>Вы были заблокированы администрацией.</b>", parse_mode=ParseMode.HTML)
+        except Exception: pass
+        try: await bot.close_forum_topic(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id)
+        except Exception: pass
+    else:
+        await callback.message.edit_text("❌ <b>Бан отклонен.</b>", parse_mode=ParseMode.HTML)
+        await bot.send_message(ADMIN_CHAT_ID, "❌ <b>Куратор отклонил запрос на бан.</b> Продолжайте общение.", message_thread_id=topic_id, parse_mode=ParseMode.HTML)
+
 
 @dp.message(Command("photoid"), F.from_user.id == OWNER_ID)
 async def cmd_toggle_photoid(message: types.Message):
@@ -477,12 +540,11 @@ async def cmd_toggle_photoid(message: types.Message):
     global photo_id_mode
     photo_id_mode = not photo_id_mode
     state_text = "ВКЛЮЧЕН 🟢" if photo_id_mode else "ВЫКЛЮЧЕН 🔴"
-    await message.answer(f"📸 Режим получения ID фото: <b>{state_text}</b>\nТеперь бот {'будет' if photo_id_mode else 'не будет'} реагировать на отправленные картинки.", parse_mode=ParseMode.HTML)
+    await message.answer(f"📸 Режим получения ID фото: <b>{state_text}</b>", parse_mode=ParseMode.HTML)
 
 @dp.message(F.photo, F.from_user.id == OWNER_ID)
 async def get_photo_id(message: types.Message):
-    if not photo_id_mode: 
-        return
+    if not photo_id_mode: return
     photo_id = message.photo[-1].file_id
     await message.answer(f"📸 <b>ID вашей картинки:</b>\n\n<code>{photo_id}</code>", parse_mode=ParseMode.HTML)
 
@@ -492,29 +554,26 @@ async def cmd_help(message: types.Message):
     try: await message.delete()
     except Exception: pass
     role = await get_admin_role(message.from_user.id)
-    if not role: return await message.answer("❌ У вас нет доступа к командам администратора.")
+    if not role: return await message.answer("❌ У вас нет доступа.")
     help_text = (
         "📌 <b>Список доступных команд:</b>\n\n"
-        "👑 <b>Управление и Статистика:</b>\n"
-        "├ /stats — Полная статистика бота\n"
-        "├ /adminstats — Статистика закрытых тикетов\n"
+        "👑 <b>Управление:</b>\n"
+        "├ /stats — Статистика бота\n"
+        "├ /adminstats — Статистика тикетов\n"
         "├ /adminlist — Список состава\n"
-        "├ /check — Проверить пользователя (по реплаю/ID/юзернейму)\n"
-        "├ /id — Узнать ID пользователя (ответом)\n"
-        "├ /broadcast — Сделать рассылку пользователям\n"
-        "└ /photoid — Вкл/Выкл получение ID картинок (Только Владелец)\n\n"
+        "├ /check — Проверить пользователя\n"
+        "├ /use — Memory-based досье с карточкой\n"
+        "├ /id — ID пользователя\n"
+        "└ /broadcast — Сделать рассылку\n\n"
         "🛡 <b>Роли и Дисциплина:</b>\n"
-        "├ /setdirector [ID] — Назначить директора\n"
-        "├ /setadmin [ID] — Назначить администратора\n"
-        "├ /setintern [ID] — Назначить стажёра\n"
-        "├ /demote [ID] — Уволить (понизить до пользователя)\n"
+        "├ /setdirector, /setadmin, /setintern, /demote [ID]\n"
         "├ /addmins [ID] [тег] — Установить тег\n"
-        "├ /setcurator [ID_админа] [ID_куратора] — Привязать куратора\n"
-        "├ /warn [ID] — Выдать выговор (5 = автокик)\n"
+        "├ /setcurator [ID_админа] [ID_куратора]\n"
+        "├ /warn [ID] — Выговор (5 = автокик)\n"
         "└ /unwarn [ID] — Сбросить выговоры\n\n"
-        "🎫 <b>Тикеты (внутри топика пользователя):</b>\n"
-        "└ /close — Закрыть тикет (запишет стату и уведомит юзера)\n\n"
-        "📢 <b>Шаблоны постов:</b> пост 1, пост 2... пост 6"
+        "🎫 <b>Тикеты:</b>\n"
+        "├ /close — Закрыть тикет\n"
+        "└ /ban — Заблокировать юзера (внутри топика)"
     )
     await message.answer(help_text, parse_mode=ParseMode.HTML)
 
@@ -524,10 +583,7 @@ async def cmd_id(message: types.Message):
     try: await message.delete()
     except Exception: pass
     target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
-    await message.answer(
-        f"🆔 <b>Информация:</b>\n├ Имя: {target.first_name}\n├ Юзернейм: @{target.username}\n└ ID: <code>{target.id}</code>",
-        parse_mode=ParseMode.HTML
-    )
+    await message.answer(f"🆔 <b>Информация:</b>\n├ Имя: {target.first_name}\n├ Юзернейм: @{target.username}\n└ ID: <code>{target.id}</code>", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("check"))
 @dp.message(F.text.lower().in_({".чек", "/check"}))
@@ -537,33 +593,26 @@ async def cmd_check(message: types.Message):
     if not await get_admin_role(message.from_user.id): return await message.answer("❌ У вас нет прав.")
     
     args = message.text.split()
-    target_id = None
-    target_username = None
+    target_id, target_username = None, None
 
-    if message.reply_to_message:
-        target_id = message.reply_to_message.from_user.id
+    if message.reply_to_message: target_id = message.reply_to_message.from_user.id
     elif len(args) > 1:
         arg = args[1]
-        if arg.isdigit():
-            target_id = int(arg)
-        elif arg.startswith("@"):
-            target_username = arg[1:]
-        else:
-            target_username = arg
+        if arg.isdigit(): target_id = int(arg)
+        elif arg.startswith("@"): target_username = arg[1:]
+        else: target_username = arg
     else:
-        return await message.answer("⚠️ Используйте команду ответом на сообщение или укажите ID/Юзернейм (Например: <code>.чек 123456</code> или <code>.чек @user</code>)", parse_mode=ParseMode.HTML)
+        return await message.answer("⚠️ Используйте: <code>.чек 123456</code> или <code>.чек @user</code>", parse_mode=ParseMode.HTML)
 
     async with db_pool.acquire() as conn:
-        if target_id:
-            user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked FROM users WHERE user_id = $1;", target_id)
-        elif target_username:
-            user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked FROM users WHERE username ILIKE $1;", target_username)
+        if target_id: user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked, is_banned FROM users WHERE user_id = $1;", target_id)
+        elif target_username: user_data = await conn.fetchrow("SELECT user_id, first_name, username, topic_id, is_blocked, is_banned FROM users WHERE username ILIKE $1;", target_username)
     
-    if not user_data:
-        return await message.answer(f"❌ Пользователь не найден в базе.", parse_mode=ParseMode.HTML)
+    if not user_data: return await message.answer(f"❌ Пользователь не найден в базе.", parse_mode=ParseMode.HTML)
         
-    has_ticket = "Да (топик открыт)" if user_data["topic_id"] else "Нет активных тикетов"
-    is_blocked = "🚫 Да" if user_data["is_blocked"] else "🍏 Нет (Активен)"
+    has_ticket = "Да" if user_data["topic_id"] else "Нет"
+    is_blocked = "🚫 Да" if user_data["is_blocked"] else "🍏 Нет"
+    is_banned = "🔴 Да" if user_data["is_banned"] else "🟢 Нет"
     username_text = f"@{user_data['username']}" if user_data['username'] else "Скрыт"
     
     await message.answer(
@@ -571,7 +620,8 @@ async def cmd_check(message: types.Message):
         f"├ Имя: {user_data['first_name']}\n"
         f"├ Юзернейм: {username_text}\n"
         f"├ ID: <code>{user_data['user_id']}</code>\n"
-        f"├ Бот заблокирован: {is_blocked}\n"
+        f"├ Заблокировал бота: {is_blocked}\n"
+        f"├ Бан от админов: {is_banned}\n"
         f"└ Тикет: {has_ticket}", 
         parse_mode=ParseMode.HTML
     )
@@ -616,10 +666,8 @@ async def cmd_admin_stats(message: types.Message):
     for r in rows:
         r_sum = r['r_sum'] or 0
         r_count = r['r_count'] or 0
-        rating = f"{(r_sum / r_count):.1f}⭐️" if r_count > 0 else "Нет оценок"
-        
+        rating = f"{(r_sum / r_count):.1f}⭐️" if r_count > 0 else "Нет"
         username_text = f"@{r['admin_username']}" if r['admin_username'] else f"ID: {r['admin_id']}"
-        
         text += (
             f"👤 <b>{username_text}</b>\n"
             f" ├ Взято всего: <b>{r['total_taken']}</b>\n"
@@ -654,105 +702,25 @@ async def cmd_stats(message: types.Message):
         total_msgs = user_msgs + admin_msgs
 
     stats_text = (
-        "📊 <b>Полная статистика бота:</b>\n\n"
+        "📊 <b>Полная статистика:</b>\n\n"
         "👥 <b>Пользователи:</b>\n"
         f"├ Всего пользователей: <b>{total_users}</b>\n"
         f"├ 🍏 Активных (чистых): <b>{active_users}</b>\n"
-        f"└ 🚫 Забаненных: <b>{banned_users}</b>\n\n"
+        f"└ 🚫 Забаненных (или блок): <b>{banned_users}</b>\n\n"
         "🎭 <b>Разделение по ролям:</b>\n"
         f"├ 👑 Владелец: <b>{owner_count}</b>\n"
         f"├ 💼 Директоров: <b>{directors_count}</b>\n"
         f"├ 🛡 Администраторов: <b>{admins_count}</b>\n"
         f"├ 🔰 Стажёров: <b>{interns_count}</b>\n"
         f"└ 👤 Пользователей: <b>{regular_users}</b>\n\n"
-        "✉️ <b>Сообщения и активность:</b>\n"
+        "✉️ <b>Сообщения:</b>\n"
         f"├ 📩 От пользователей: <b>{user_msgs}</b>\n"
         f"├ 📤 От администраторов: <b>{admin_msgs}</b>\n"
         f"└ 💬 Всего сообщений: <b>{total_msgs}</b>"
     )
-    
     await message.answer(stats_text, parse_mode=ParseMode.HTML)
 
-@dp.message(F.text.in_({"пост 1", "пост 2", "пост 3", "пост 4", "пост 5", "пост 6"}), F.from_user.id == OWNER_ID)
-async def send_custom_template_post(message: types.Message):
-    try: await message.delete()
-    except Exception: pass
-    global last_tech_message_id
-    try:
-        key = message.text.split()[-1]
-        template = POST_TEMPLATES.get(key)
-        if key in ("4", "5") and last_tech_message_id:
-            try: await bot.delete_message(chat_id=CHANNEL_ID, message_id=last_tech_message_id)
-            except Exception: pass
-            last_tech_message_id = None
-        sent_msg = await bot.send_photo(chat_id=CHANNEL_ID, photo=template["photo"], caption=template["text"], parse_mode=ParseMode.HTML)
-        if key in ("1", "3"): last_tech_message_id = sent_msg.message_id
-        async with db_pool.acquire() as conn:
-            await conn.execute("INSERT INTO channel_posts (message_id, channel_id, text) VALUES ($1, $2, $3);", sent_msg.message_id, sent_msg.chat.id, template["text"])
-        await message.answer(f"✅ Пост #{key} успешно опубликован!")
-    except Exception: await message.answer("❌ Ошибка публикации.")
-
-@dp.message(Command(commands=["setdirector", "setadmin", "setintern", "demote"]))
-async def set_role_command(message: types.Message):
-    if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return await message.answer("❌ Недостаточно прав.")
-    args = message.text.split()
-    if len(args) < 2: return await message.answer("⚠️ Использование: /command <user_id>")
-    target_id = int(args[1])
-    command = args[0][1:].split('@')[0]
-    async with db_pool.acquire() as conn:
-        if command == "demote":
-            await conn.execute("DELETE FROM admins WHERE user_id = $1;", target_id)
-            return await message.answer(f"✅ Пользователь <code>{target_id}</code> уволен.", parse_mode=ParseMode.HTML)
-        role_map = {"setdirector": "director", "setadmin": "admin", "setintern": "intern"}
-        new_role = role_map.get(command)
-        await conn.execute("INSERT INTO admins (user_id, role) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET role = $2;", target_id, new_role)
-    await message.answer(f"✅ Роль <b>{new_role}</b> назначена <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
-
-@dp.message(Command("addmins"))
-async def cmd_addmins(message: types.Message):
-    if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3: return
-    async with db_pool.acquire() as conn: await conn.execute("UPDATE admins SET tag = $1 WHERE user_id = $2;", args[2], int(args[1]))
-    await message.answer(f"✅ Установлен тег: <b>{args[2]}</b>", parse_mode=ParseMode.HTML)
-
-@dp.message(Command("setcurator"))
-async def cmd_set_curator(message: types.Message):
-    if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return
-    args = message.text.split()
-    if len(args) < 3: return
-    async with db_pool.acquire() as conn: await conn.execute("UPDATE admins SET curator_id = $1 WHERE user_id = $2;", int(args[2]), int(args[1]))
-    await message.answer(f"✅ Куратор назначен.")
-
-@dp.message(Command("warn"))
-async def cmd_warn(message: types.Message):
-    if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return
-    args = message.text.split()
-    if len(args) < 2: return
-    target_id = int(args[1])
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT warns, curator_id FROM admins WHERE user_id = $1;", target_id)
-        if not row: return
-        new_warns = row['warns'] + 1
-        if new_warns >= 5:
-            await conn.execute("DELETE FROM admins WHERE user_id = $1;", target_id)
-            try:
-                await bot.ban_chat_member(chat_id=ADMIN_CHAT_ID, user_id=target_id)
-                await bot.unban_chat_member(chat_id=ADMIN_CHAT_ID, user_id=target_id)
-            except Exception: pass
-            await message.answer(f"⚠️ Админ {target_id} получил 5/5 выговоров и снят.")
-        else:
-            await conn.execute("UPDATE admins SET warns = $1 WHERE user_id = $2;", new_warns, target_id)
-            await message.answer(f"⚠️ Выговор выдан. Статус: <b>{new_warns}/5</b>", parse_mode=ParseMode.HTML)
-
-@dp.message(Command("unwarn"))
-async def cmd_unwarn(message: types.Message):
-    if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return
-    args = message.text.split()
-    if len(args) < 2: return
-    async with db_pool.acquire() as conn: await conn.execute("UPDATE admins SET warns = 0 WHERE user_id = $1;", int(args[1]))
-    await message.answer("✅ Выговоры обнулены.")
-
+# Рассылка с превью (Поддерживает Premium!)
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: types.Message, state: FSMContext):
     try: await message.delete()
@@ -761,11 +729,10 @@ async def cmd_broadcast(message: types.Message, state: FSMContext):
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Всем пользователям", callback_data="bc_all")],
-        [InlineKeyboardButton(text="🔥 Самым активным (Топ 50)", callback_data="bc_active")],
-        [InlineKeyboardButton(text="☀️ Самым теплым (Топ 50)", callback_data="bc_warm")],
+        [InlineKeyboardButton(text="🔥 Топ 50 (самые активные)", callback_data="bc_active")],
         [InlineKeyboardButton(text="🔢 Каждому N-ому", callback_data="bc_nth")]
     ])
-    await message.answer("📢 <b>Настройка рассылки</b>\nВыберите, кому отправить сообщение:", reply_markup=kb, parse_mode=ParseMode.HTML)
+    await message.answer("📢 <b>Настройка рассылки</b>\nВыберите аудиторию:", reply_markup=kb, parse_mode=ParseMode.HTML)
     await state.set_state(BotStates.waiting_for_broadcast_audience)
 
 @dp.callback_query(F.data.startswith("bc_"), BotStates.waiting_for_broadcast_audience)
@@ -774,10 +741,10 @@ async def process_bc_audience(callback: CallbackQuery, state: FSMContext):
     await state.update_data(audience=audience)
     
     if audience == "nth":
-        await callback.message.edit_text("🔢 Введите число N (например, 5 — отправит каждому пятому):")
+        await callback.message.edit_text("🔢 Введите число N (например, 5):")
         await state.set_state(BotStates.waiting_for_broadcast_n)
     else:
-        await callback.message.edit_text("📢 Отправьте сообщение (текст, фото, видео) для рассылки:")
+        await callback.message.edit_text("📢 Отправьте пост для рассылки (любой текст, медиа, Premium-эмодзи):")
         await state.set_state(BotStates.waiting_for_broadcast)
 
 @dp.message(BotStates.waiting_for_broadcast_n)
@@ -785,48 +752,59 @@ async def process_bc_n(message: types.Message, state: FSMContext):
     if not message.text.isdigit() or int(message.text) < 2:
         return await message.answer("⚠️ Пожалуйста, введите число (больше 1).")
     await state.update_data(nth=int(message.text))
-    await message.answer("📢 Отправьте сообщение для рассылки:")
+    await message.answer("📢 Отправьте пост для рассылки:")
     await state.set_state(BotStates.waiting_for_broadcast)
 
 @dp.message(BotStates.waiting_for_broadcast)
-async def process_broadcast(message: types.Message, state: FSMContext):
+async def process_broadcast_preview(message: types.Message, state: FSMContext):
+    # Сохраняем сообщение для рассылки в память
+    await state.update_data(bc_msg_id=message.message_id, bc_chat_id=message.chat.id)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 /send (Начать рассылку)", callback_data="bc_confirm_send")],
+        [InlineKeyboardButton(text="❌ /cancel (Отменить)", callback_data="bc_confirm_cancel")]
+    ])
+    
+    # Показываем админу, как будет выглядеть пост
+    await message.send_copy(chat_id=message.chat.id)
+    await message.answer("👆 <b>Вот так будет выглядеть рассылка.</b>\nПоддерживаются текст, медиа и Premium-эмодзи!\n\nЧто делаем?", reply_markup=kb, parse_mode=ParseMode.HTML)
+
+@dp.callback_query(F.data.in_(["bc_confirm_send", "bc_confirm_cancel"]))
+async def execute_broadcast(callback: CallbackQuery, state: FSMContext):
+    if callback.data == "bc_confirm_cancel":
+        await callback.message.edit_text("🚫 Рассылка отменена.")
+        return await state.clear()
+
     data = await state.get_data()
+    bc_msg_id, bc_chat_id = data.get("bc_msg_id"), data.get("bc_chat_id")
     audience, nth = data.get("audience"), data.get("nth", 1)
     
-    async with db_pool.acquire() as conn: 
+    await callback.message.edit_text("⏳ <b>Рассылка запущена...</b>", parse_mode=ParseMode.HTML)
+    
+    async with db_pool.acquire() as conn:
         if audience in ["all", "nth"]:
-            users = await conn.fetch("SELECT user_id FROM users WHERE is_blocked = FALSE;")
+            users = await conn.fetch("SELECT user_id FROM users WHERE is_blocked = FALSE AND is_banned = FALSE;")
         elif audience == "active":
-            users = await conn.fetch("SELECT user_id FROM users WHERE is_blocked = FALSE ORDER BY msg_count DESC LIMIT 50;")
-        elif audience == "warm":
-            users = await conn.fetch("SELECT user_id FROM users WHERE is_blocked = FALSE ORDER BY warmth DESC LIMIT 50;")
+            users = await conn.fetch("SELECT user_id FROM users WHERE is_blocked = FALSE AND is_banned = FALSE ORDER BY msg_count DESC LIMIT 50;")
             
     if audience == "nth": users = users[::nth]
     
     success, blocked = 0, 0
-    status_msg = await message.answer(f"⏳ <b>Рассылка началась...</b>\nЦелевая аудитория: {len(users)} чел.", parse_mode=ParseMode.HTML)
-    
-    async with db_pool.acquire() as conn:
-        for u in users:
-            try:
-                await message.send_copy(chat_id=u["user_id"])
-                success += 1
-                await asyncio.sleep(0.05)
-            except Exception as e:
-                err_text = str(e).lower()
-                if "forbidden" in err_text or "bot was blocked" in err_text or "deactivated" in err_text:
-                    blocked += 1
-                    await conn.execute("UPDATE users SET is_blocked = TRUE WHERE user_id = $1;", u["user_id"])
+    for u in users:
+        try:
+            # COPY_MESSAGE: Идеальное клонирование поста с сохранением Premium анимаций!
+            await bot.copy_message(chat_id=u["user_id"], from_chat_id=bc_chat_id, message_id=bc_msg_id)
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            blocked += 1
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE users SET is_blocked = TRUE WHERE user_id = $1;", u["user_id"])
                 
-    await status_msg.edit_text(
-        f"✅ <b>Рассылка завершена!</b>\n\n"
-        f"Успешно доставлено: <b>{success}</b>\n"
-        f"Заблокировали бота: <b>{blocked}</b>", 
-        parse_mode=ParseMode.HTML
-    )
+    await callback.message.answer(f"✅ <b>Рассылка завершена!</b>\nУспешно: {success}\nЗаблокировали бота: {blocked}", parse_mode=ParseMode.HTML)
     await state.clear()
 
-# --- ОБРАБОТКА ТИКЕТОВ ---
+# --- ОБРАБОТКА ТИКЕТОВ В ЛС ---
 @dp.message(F.chat.type == "private")
 async def private_msg(message: types.Message, state: FSMContext):
     if await state.get_state(): return
@@ -835,6 +813,11 @@ async def private_msg(message: types.Message, state: FSMContext):
     try:
         topic_id = None
         async with db_pool.acquire() as conn:
+            # Проверяем, не забанен ли пользователь!
+            user_row_banned = await conn.fetchrow("SELECT is_banned FROM users WHERE user_id = $1;", user_id)
+            if user_row_banned and user_row_banned.get("is_banned"):
+                return # Игнорируем сообщения от забаненных
+            
             await conn.execute("UPDATE users SET msg_count = msg_count + 1, is_blocked = FALSE WHERE user_id = $1;", user_id)
             async with conn.transaction():
                 user_row = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1 FOR UPDATE;", user_id)
@@ -852,10 +835,10 @@ async def private_msg(message: types.Message, state: FSMContext):
                 ADMIN_CHAT_ID, 
                 message_thread_id=UNASSIGNED_TOPIC_ID, 
                 text=f"⚠️ Новое обращение от [<code>{user_id}</code>]", 
-                reply_markup=kb, 
-                parse_mode=ParseMode.HTML
+                reply_markup=kb, parse_mode=ParseMode.HTML
             )
 
+        # Отправка сообщений пользователя с сохранением Premium-стикеров
         await message.send_copy(chat_id=ADMIN_CHAT_ID, message_thread_id=topic_id)
     except Exception as e: logger.error(f"Ошибка private_msg: {e}")
 
@@ -868,14 +851,10 @@ async def take_pz(callback: types.CallbackQuery):
         
         async with db_pool.acquire() as conn:
             user_row = await conn.fetchrow("SELECT topic_id FROM users WHERE user_id = $1;", target_id)
-            
             if not user_row or not user_row["topic_id"]: 
-                return await callback.answer("❌ Топик не найден. Возможно, пользователь удалил чат.", show_alert=True)
+                return await callback.answer("❌ Топик не найден.", show_alert=True)
                 
-            await conn.execute("""
-                INSERT INTO admin_actions (admin_id, admin_username, target_user_id, status, action_time) 
-                VALUES ($1, $2, $3, 'open', NOW());
-            """, admin_id, callback.from_user.username, target_id)
+            await conn.execute("INSERT INTO admin_actions (admin_id, admin_username, target_user_id, status, action_time) VALUES ($1, $2, $3, 'open', NOW());", admin_id, callback.from_user.username, target_id)
             await conn.execute("UPDATE admins SET taken_tickets = taken_tickets + 1 WHERE user_id = $1;", admin_id)
         
         user_topic_id = user_row["topic_id"]
@@ -883,20 +862,10 @@ async def take_pz(callback: types.CallbackQuery):
         clean_chat_id = chat_id_str[4:] if chat_id_str.startswith("-100") else chat_id_str.lstrip("-")
         topic_link = f"https://t.me/c/{clean_chat_id}/{user_topic_id}"
         
-        await callback.message.edit_text(
-            f"✅ <b>Обращение взято!</b> Сотрудник: <b>{admin_mention}</b>\n🔗 <a href='{topic_link}'>Перейти в топик</a>", 
-            parse_mode=ParseMode.HTML
-        )
-        await bot.send_message(
-            chat_id=ADMIN_CHAT_ID, 
-            message_thread_id=user_topic_id, 
-            text=f"🟢 Закреплено за {admin_mention}!\n<i>Для закрытия напишите /close</i>", 
-            parse_mode=ParseMode.HTML
-        )
-        
+        await callback.message.edit_text(f"✅ <b>Обращение взято!</b> Сотрудник: <b>{admin_mention}</b>\n🔗 <a href='{topic_link}'>Перейти в топик</a>", parse_mode=ParseMode.HTML)
+        await bot.send_message(chat_id=ADMIN_CHAT_ID, message_thread_id=user_topic_id, text=f"🟢 Закреплено за {admin_mention}!\n<i>Для закрытия напишите /close, для бана /ban</i>", parse_mode=ParseMode.HTML)
         await callback.answer("Готово!")
     except Exception as e:
-        logger.error(f"Ошибка в take_pz: {e}")
         await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 @dp.message(Command("close"), F.chat.id == ADMIN_CHAT_ID)
@@ -932,10 +901,36 @@ async def process_rating(callback: CallbackQuery):
 @dp.message(F.chat.id == ADMIN_CHAT_ID)
 async def admin_reply(message: types.Message):
     if not message.message_thread_id or message.message_thread_id == UNASSIGNED_TOPIC_ID or message.from_user.is_bot: return
-    if message.text and message.text.startswith("/close"): return
+    if message.text and message.text.startswith("/"): return # Игнорируем команды
     async with db_pool.acquire() as conn:
         user_row = await conn.fetchrow("SELECT user_id FROM users WHERE topic_id = $1;", message.message_thread_id)
+    # Отправка сообщений админа с сохранением Premium-стикеров
     if user_row: await message.send_copy(chat_id=user_row["user_id"])
+
+# Остальные команды для управления ролями...
+@dp.message(Command(commands=["setdirector", "setadmin", "setintern", "demote"]))
+async def set_role_command(message: types.Message):
+    if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return await message.answer("❌ Недостаточно прав.")
+    args = message.text.split()
+    if len(args) < 2: return await message.answer("⚠️ Использование: /command <user_id>")
+    target_id = int(args[1])
+    command = args[0][1:].split('@')[0]
+    async with db_pool.acquire() as conn:
+        if command == "demote":
+            await conn.execute("DELETE FROM admins WHERE user_id = $1;", target_id)
+            return await message.answer(f"✅ Пользователь <code>{target_id}</code> уволен.", parse_mode=ParseMode.HTML)
+        role_map = {"setdirector": "director", "setadmin": "admin", "setintern": "intern"}
+        new_role = role_map.get(command)
+        await conn.execute("INSERT INTO admins (user_id, role) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET role = $2;", target_id, new_role)
+    await message.answer(f"✅ Роль <b>{new_role}</b> назначена <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
+
+@dp.message(Command("setcurator"))
+async def cmd_set_curator(message: types.Message):
+    if await get_admin_role(message.from_user.id) not in ['owner', 'director']: return
+    args = message.text.split()
+    if len(args) < 3: return
+    async with db_pool.acquire() as conn: await conn.execute("UPDATE admins SET curator_id = $1 WHERE user_id = $2;", int(args[2]), int(args[1]))
+    await message.answer(f"✅ Куратор назначен.")
 
 # --- ЗАПУСК ---
 async def main():
