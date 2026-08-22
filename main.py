@@ -11,7 +11,7 @@ from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo
 from aiogram.exceptions import TelegramAPIError
 
 # --- НАСТРОЙКИ ЛОГИРОВАНИЯ ---
@@ -67,22 +67,6 @@ HUGS = [
     "Если день был тяжелым, помни, что теперь он закончился. Завтра будет легче. *Теплые обнимашки* 🌙",
     "Лови тысячу лучей поддержки! Ты не один, мы рядом. ☀️",
     "*Гладит по голове* Ты стараешься, и это самое главное. Отдохни сегодня как следует."
-]
-
-FILMS = [
-    "Ходячий замок (2004) 🏰 — Идеальная сказка от Хаяо Миядзаки для уютного вечера.",
-    "Шепот сердца (1995) 🎻 — Вдохновляющее аниме о поиске себя, творчестве и любви.",
-    "Твое имя (2016) 🌠 — Невероятно красивая история о связи сквозь время и расстояние.",
-    "Маленькие женщины (2019) 📖 — Теплый, осенний и очень душевный фильм о семье и мечтах.",
-    "Амели (2001) ☕️ — Чудаковатая, но очень светлая французская классика о маленьких радостях жизни."
-]
-
-MUSIC = [
-    "Lofi Girl - 1 A.M Study Session 🎧 — Идеальный расслабляющий фон для учебы или мыслей.",
-    "The Neighbourhood - Sweater Weather 🌧 — Настоящая осенне-вечерняя классика.",
-    "Сироткин - Выше домов 🌇 — Очень светлая, теплая и атмосферная русскоязычная инди-песня.",
-    "Joji - Glimpse of Us 🎹 — Меланхоличная, немного грустная, но невероятно красивая.",
-    "Coldplay - Yellow 🌟 — Песня, которая звучит и ощущается как теплые дружеские объятия."
 ]
 
 FAQ_TEXT = (
@@ -201,6 +185,36 @@ class SecurityMiddleware(BaseMiddleware):
                     except Exception as e:
                         logger.error(f"Ошибка при отправке уведомления владельцу: {e}")
         return await handler(event, data)
+
+# --- ПАНЕЛЬ ВЛАДЕЛЬЦА (MINI APP) ---
+@dp.message(Command("panel"), F.from_user.id == OWNER_ID)
+async def cmd_panel(message: types.Message):
+    try: await message.delete()
+    except Exception: pass
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📱 Открыть панель управления", 
+            web_app=WebAppInfo(url="https://lukinovd24-maker.github.io/bot-panel/") 
+        )]
+    ])
+    
+    await message.answer(
+        "👑 <b>Панель управления Владельца</b>\nНажмите кнопку ниже, чтобы запустить интерфейс:", 
+        reply_markup=kb, 
+        parse_mode=ParseMode.HTML
+    )
+
+@dp.message(F.web_app_data)
+async def process_web_app_data(message: types.Message):
+    if message.from_user.id != OWNER_ID: return
+    
+    data = message.web_app_data.data
+    
+    if data == "get_stats":
+        await cmd_stats(message)
+    elif data == "get_admins":
+        await cmd_adminlist(message)
 
 # --- РАДАР НОВЫХ ЛИЦ В ЧАТЕ ---
 @dp.message(F.new_chat_members, F.chat.id == ADMIN_CHAT_ID)
@@ -564,6 +578,7 @@ async def cmd_help(message: types.Message):
         "├ /check — Проверить пользователя\n"
         "├ /use — Memory-based досье с карточкой\n"
         "├ /id — ID пользователя\n"
+        "├ /panel — Панель управления Владельца (Mini App)\n"
         "└ /broadcast — Сделать рассылку\n\n"
         "🛡 <b>Роли и Дисциплина:</b>\n"
         "├ /setdirector, /setadmin, /setintern, /demote [ID]\n"
