@@ -163,16 +163,32 @@ async def cmd_panel(message: types.Message):
     try: await message.delete()
     except Exception: pass
 
+    # Считаем статистику ПЕРЕД открытием панели!
+    async with db_pool.acquire() as conn:
+        admins_count = await conn.fetchval("SELECT COUNT(*) FROM admins;") or 0
+        
+    try:
+        chat_count = await bot.get_chat_member_count(ADMIN_CHAT_ID)
+        chat_count -= 1 # Вычитаем самого бота
+    except Exception:
+        chat_count = 0
+        
+    without_role = max(0, chat_count - admins_count)
+
+    # Упаковываем цифры в ссылку
+    base_url = "https://lukinovd24-maker.github.io/bot-panel/"
+    final_url = f"{base_url}?chat_count={chat_count}&admins={admins_count}&without_role={without_role}"
+
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(
             text="📱 Открыть панель управления", 
-            web_app=WebAppInfo(url="https://lukinovd24-maker.github.io/bot-panel/") 
+            web_app=WebAppInfo(url=final_url) 
         )]],
         resize_keyboard=True
     )
     
     await message.answer(
-        "👑 <b>Секретная панель активирована.</b>\nКнопка появилась внизу, под полем ввода текста!", 
+        "👑 <b>Секретная панель собрала данные!</b>\nКнопка появилась внизу, под полем ввода текста!", 
         reply_markup=kb, 
         parse_mode=ParseMode.HTML
     )
@@ -186,16 +202,7 @@ async def process_web_app_data(message: types.Message):
     if message.from_user.id != OWNER_ID: return
     data = message.web_app_data.data
     
-    if data == "get_stats": await cmd_stats(message)
-    elif data == "get_admins": await cmd_adminlist(message)
-    elif data == "get_chat_count":
-        try:
-            count = await bot.get_chat_member_count(ADMIN_CHAT_ID)
-            await message.answer(f"👥 <b>Количество людей в админ-чате:</b> {count} чел.", parse_mode=ParseMode.HTML)
-        except Exception:
-            await message.answer("❌ Не удалось получить список. Бот должен быть админом в чате.")
-            
-    elif data.startswith("role|"):
+    if data.startswith("role|"):
         parts = data.split("|")
         if len(parts) < 3: return
         action, target_id_str = parts[1], parts[2]
