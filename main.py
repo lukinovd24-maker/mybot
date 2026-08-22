@@ -202,7 +202,13 @@ async def process_web_app_data(message: types.Message):
     if message.from_user.id != OWNER_ID: return
     data = message.web_app_data.data
     
-    if data.startswith("role|"):
+    # ВОТ ОНИ! ВЕРНУЛ ОБРАБОТЧИКИ КНОПОК!
+    if data == "get_stats":
+        await cmd_stats(message)
+    elif data == "get_admins":
+        await cmd_adminlist(message)
+        
+    elif data.startswith("role|"):
         parts = data.split("|")
         if len(parts) < 3: return
         action, target_id_str = parts[1], parts[2]
